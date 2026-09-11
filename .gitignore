@@ -1,0 +1,4 @@
+.env
+kino_bot.db
+__pycache__/
+*.pyc
