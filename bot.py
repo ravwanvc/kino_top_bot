@@ -1003,41 +1003,48 @@ def subscription_keyboard(channels):
 
 
 async def require_subscription(message: Message):
-    channels = all_required_channels()
+    missing = await get_missing_required_channels(message.from_user.id)
 
-    if not channels:
+    if not missing:
         return True
 
-    await message.answer(
-        "🔒 <b>MAJBURIY OBUNA</b>\n\n"
-        "Kino olish uchun quyidagi kanallarga obuna bo'ling:\n\n"
-        "1️⃣ Kanalga kiring\n"
+    text = (
+        "📢 <b>Xush kelibsiz!</b>\n\n"
+        "Botdan to'liq foydalanish va kinolarni ko'rish uchun "
+        "quyidagi kanallarimizga obuna bo'ling:\n\n"
+        "1️⃣ Pastdagi tugmalar orqali kanallarga kiring\n"
         "2️⃣ <b>Obuna bo'ling</b>\n"
-        "3️⃣ <b>✅ Obunani tekshirish</b> tugmasini bosing.\n\n"
-        "📢 Kanallarga kirish uchun quyidagi tugmalardan foydalaning.",
-        reply_markup=subscription_keyboard(channels)
+        "3️⃣ <b>✅ Obunani tekshirish</b> tugmasini bosing."
+    )
+
+    await message.answer(
+        text=text,
+        reply_markup=subscription_keyboard(missing)
     )
 
     return False
-
-
 @dp.callback_query(F.data == "check_subscription")
 async def check_subscription_callback(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    missing = await get_missing_required_channels(user_id)
 
-    await callback.answer(
-        "✅ Tekshirildi!",
-        show_alert=True
-    )
-
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-
-    await callback.message.answer(
-        "✅ <b>Tekshiruv tugadi!</b>\n\n"
-        "Endi kino kodini yuborishingiz mumkin."
-    )
+    if missing:
+        # Hali obuna bo'lmagan bo'lsa:
+        await callback.answer(
+            "❌ Hali barcha majburiy kanallarga obuna bo'lmadingiz!",
+            show_alert=True
+        )
+    else:
+        # Barcha kanallarga obuna bo'lgan bo'lsa:
+        await callback.answer("✅ Rahmat! Obuna tasdiqlandi.", show_alert=True)
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(
+            "✅ <b>Tekshiruv muvaffaqiyatli o'tdi!</b>\n\n"
+            "Endi kino kodini yuborishingiz mumkin."
+        )
 
 
 # =========================================================
@@ -1340,7 +1347,6 @@ def back_admin_keyboard():
         [InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_back")]
     ])
 
-
 def payment_admin_keyboard(payment_id):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -1398,50 +1404,31 @@ async def send_home(message: Message):
         "👇 Kerakli bo'limni tanlang:",
         reply_markup=user_menu(),
     )
-
-
-# =========================================================
-# START + REFERRAL
-# =========================================================
 @dp.message(CommandStart())
-async def start_handler(message: Message):
-    is_new = create_or_update_user(message)
+async def cmd_start(message: Message):
+    # 1. Userni bazaga qo'shish/yangilash
+    create_or_update_user(message)
+    
+    # 2. Taklif qilingan do'stlarni tekshirish
+    ref_id = parse_referral_arg(message)
+    if ref_id:
+        create_referral(referrer_id=ref_id, referred_id=message.from_user.id)
 
-    # Referral is accepted ONLY on the user's first /start.
-    if is_new:
-        referrer_id = parse_referral_arg(message)
+    # 3. Majburiy obuna tekshiruvi
+    if not await require_subscription(message):
+        return  # Obuna bo'lmagan bo'lsa, xabar ko'rsatilib ish to'xtaydi
 
-        if referrer_id and create_referral(
-            referrer_id,
-            message.from_user.id,
-        ):
-            try:
-                await bot.send_message(
-                    referrer_id,
-                    "👥 <b>Yangi referral!</b>\n\n"
-                    f"👤 {esc(message.from_user.first_name)} botga sizning "
-                    "havolangiz orqali kirdi.\n\n"
-                    "🎁 U Premium sotib olib, to'lovi tasdiqlansa "
-                    "sizga <b>+1 kun Premium</b> beriladi.",
-                )
-            except Exception:
-                logging.exception("Referral notification failed.")
+    # 4. Obuna bo'lingan bo'lsa, asosiy menyu ko'rsatiladi
+    user_name = html.escape(message.from_user.first_name)
+    start_text = (
+        f"👋 <b>Assalomu alaykum, {user_name}!</b>\n\n"
+        f"🎬 <b>Kino Bot</b>imizga xush kelibsiz!\n\n"
+        f"🍿 Bot orqali sevimli kinolaringizni topishingiz va tomosha qilishingiz mumkin.\n\n"
+        f"👇 Kinoni olish uchun <b>Kino kodi</b>ni yuboring:"
+    )
 
-    if is_new and not is_admin(message.from_user.id):
-        try:
-            await bot.send_message(
-                ADMIN_ID,
-                "🆕 <b>YANGI FOYDALANUVCHI</b>\n\n"
-                f"👤 Ism: <b>{esc(message.from_user.first_name)}</b>\n"
-                f"🔗 Username: {username_text(message.from_user)}\n"
-                f"🆔 ID: <code>{message.from_user.id}</code>\n"
-                f"🕐 Vaqt: <code>{now_text()}</code>",
-            )
-        except Exception:
-            logging.exception("New user admin notification failed.")
-
-    await send_home(message)
-
+    await message.answer(text=start_text, reply_markup=user_menu())
+        
 
 # =========================================================
 # USER BUTTONS
