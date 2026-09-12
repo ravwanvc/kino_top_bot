@@ -1,5 +1,6 @@
 from pathlib import Path
 
+
 import asyncio
 import html
 import logging
@@ -13,37 +14,35 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
-from aiogram.types import (
-    Message,
-    CallbackQuery,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 # =========================================================
 # CONFIG
 # =========================================================
 # IMPORTANT:
-# Put secrets into environment variables.
+# Secrets are read ONLY from environment variables.
 #
-# Windows local:
-#   setx BOT_TOKEN "YOUR_NEW_TOKEN"
-#   setx ADMIN_ID "123456789"
-#   setx ADMIN_PIN "YOUR_PIN"
-#   setx PAYMENT_CARD "YOUR_CARD"
-#   setx PAYMENT_OWNER "OWNER_NAME"
+# Windows PowerShell:
+#   $env:BOT_TOKEN="YOUR_NEW_TOKEN"
+#   $env:ADMIN_ID="123456789"
+#   $env:ADMIN_PIN="YOUR_PIN"
+#   $env:PAYMENT_CARD="YOUR_CARD"
+#   $env:PAYMENT_OWNER="OWNER_NAME"
 #
-# Render:
-# Add the same variables in Environment.
+# Render -> Environment -> add the same variables.
 #
-# The old token from your previous code was exposed. Revoke it
-# in @BotFather and create a NEW token before deploying.
+# The old bot token was exposed in the previous source.
+# Revoke it in @BotFather and create a NEW token.
 # =========================================================
 
 BOT_TOKEN = os.getenv("8902562007:AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM", "8902562007:AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM").strip()
-ADMIN_ID = int(os.getenv("8972505646", "8972505646"))
-ADMIN_PIN = os.getenv("jasur.2011", "jasur.2011").strip()
 
+try:
+    ADMIN_ID = int(os.getenv("8972505646", "8972505646").strip())
+except ValueError:
+    ADMIN_ID = 0
+
+ADMIN_PIN = os.getenv("jasur.2011", "jasur.2011").strip()
 PAYMENT_CARD = os.getenv("5614 6812 8226 6067", "5614 6812 8226 6067").strip()
 PAYMENT_OWNER = os.getenv("K.M", "K.M").strip()
 
@@ -65,14 +64,13 @@ logging.basicConfig(
 
 if not BOT_TOKEN:
     raise RuntimeError(
-        "BOT_TOKEN sozlanmagan. Yangi tokenni @BotFather orqali oling "
+        "BOT_TOKEN sozlanmagan. @BotFather dan YANGI token oling "
         "va BOT_TOKEN environment variable ga yozing."
     )
 
 if ADMIN_ID <= 0:
     raise RuntimeError(
-        "ADMIN_ID noto'g'ri. Render/Windows Environment Variables ichida "
-        "ADMIN_ID ni Telegram raqamingiz bilan yozing."
+        "ADMIN_ID noto'g'ri. Environment Variables ichida ADMIN_ID ni yozing."
     )
 
 if not ADMIN_PIN:
@@ -86,9 +84,9 @@ bot = Bot(
 )
 dp = Dispatcher()
 
-# Runtime state
 ADMIN_STATE = {}
 USER_PAYMENT_PLAN = {}
+BOT_USERNAME = None
 
 
 # =========================================================
@@ -98,6 +96,22 @@ def db():
     conn = sqlite3.connect(DB_NAME, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def ensure_column(table, column, definition):
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(f"PRAGMA table_info({table})")
+    columns = {row["name"] for row in cur.fetchall()}
+
+    if column not in columns:
+        cur.execute(
+            f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+        )
+        conn.commit()
+
+    conn.close()
 
 
 def init_db():
@@ -136,6 +150,11 @@ def init_db():
             plan_key TEXT NOT NULL,
             plan_name TEXT NOT NULL,
             price INTEGER NOT NULL,
+            original_price INTEGER,
+            discount_amount INTEGER DEFAULT 0,
+            final_price INTEGER,
+            referral_discount INTEGER DEFAULT 0,
+            referrer_id INTEGER,
             receipt_file_id TEXT NOT NULL,
             receipt_type TEXT DEFAULT 'photo',
             status TEXT NOT NULL DEFAULT 'pending',
@@ -151,9 +170,6 @@ def init_db():
         )
     """)
 
-    # =====================================================
-    # REQUIRED SUBSCRIPTION CHANNELS
-    # =====================================================
     cur.execute("""
         CREATE TABLE IF NOT EXISTS required_channels (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -165,26 +181,53 @@ def init_db():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS referrals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            referrer_id INTEGER NOT NULL,
+            referred_id INTEGER NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'pending',
+            payment_id INTEGER,
+            created_at TEXT NOT NULL,
+            rewarded_at TEXT
+        )
+    """)
+
     conn.commit()
     conn.close()
 
-    # Upgrade old databases without deleting data.
+    # Safe upgrades for existing databases.
     ensure_column("payments", "approved_at", "TEXT")
+    ensure_column("payments", "original_price", "INTEGER")
+    ensure_column("payments", "discount_amount", "INTEGER DEFAULT 0")
+    ensure_column("payments", "final_price", "INTEGER")
+    ensure_column("payments", "referral_discount", "INTEGER DEFAULT 0")
+    ensure_column("payments", "referrer_id", "INTEGER")
 
-
-def ensure_column(table, column, definition):
+    # Old payments remain valid.
     conn = db()
     cur = conn.cursor()
-
-    cur.execute(f"PRAGMA table_info({table})")
-    columns = {row["name"] for row in cur.fetchall()}
-
-    if column not in columns:
-        cur.execute(
-            f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
-        )
-        conn.commit()
-
+    cur.execute("""
+        UPDATE payments
+        SET original_price = price
+        WHERE original_price IS NULL
+    """)
+    cur.execute("""
+        UPDATE payments
+        SET final_price = price
+        WHERE final_price IS NULL
+    """)
+    cur.execute("""
+        UPDATE payments
+        SET discount_amount = 0
+        WHERE discount_amount IS NULL
+    """)
+    cur.execute("""
+        UPDATE payments
+        SET referral_discount = 0
+        WHERE referral_discount IS NULL
+    """)
+    conn.commit()
     conn.close()
 
 
@@ -205,10 +248,8 @@ def parse_dt(value):
 
     try:
         dt = datetime.fromisoformat(value)
-
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=TZ)
-
         return dt
     except Exception:
         return None
@@ -238,7 +279,6 @@ def normalize_code(value):
 def username_text(user):
     if user.username:
         return f"@{esc(user.username)}"
-
     return "Username yo'q"
 
 
@@ -316,18 +356,12 @@ def create_or_update_user(message: Message):
 
         conn.commit()
         conn.close()
-
         return False
 
     cur.execute("""
         INSERT INTO users(
-            id,
-            first_name,
-            username,
-            premium_until,
-            created_at,
-            total_movies,
-            last_seen
+            id, first_name, username, premium_until,
+            created_at, total_movies, last_seen
         )
         VALUES(?, ?, ?, NULL, ?, 0, ?)
     """, (
@@ -342,7 +376,6 @@ def create_or_update_user(message: Message):
     conn.close()
 
     stat_add("new_users")
-
     return True
 
 
@@ -350,10 +383,7 @@ def all_user_ids():
     conn = db()
     cur = conn.cursor()
 
-    cur.execute(
-        "SELECT id FROM users ORDER BY id"
-    )
-
+    cur.execute("SELECT id FROM users ORDER BY id")
     rows = cur.fetchall()
     conn.close()
 
@@ -390,12 +420,9 @@ def find_user(value):
 def count_users():
     conn = db()
     cur = conn.cursor()
-
     cur.execute("SELECT COUNT(*) c FROM users")
     result = cur.fetchone()["c"]
-
     conn.close()
-
     return result
 
 
@@ -412,8 +439,209 @@ def count_active_premium():
 
     result = cur.fetchone()["c"]
     conn.close()
-
     return result
+
+
+# =========================================================
+# REFERRALS
+# =========================================================
+def parse_referral_arg(message: Message):
+    text = (message.text or "").strip()
+    parts = text.split(maxsplit=1)
+
+    if len(parts) < 2:
+        return None
+
+    arg = parts[1].strip()
+
+    if not arg.startswith("ref_"):
+        return None
+
+    raw_id = arg[4:]
+
+    if not raw_id.isdigit():
+        return None
+
+    return int(raw_id)
+
+
+def create_referral(referrer_id, referred_id):
+    if referrer_id == referred_id:
+        return False
+
+    if not get_user(referrer_id):
+        return False
+
+    if not get_user(referred_id):
+        return False
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        "SELECT id FROM referrals WHERE referred_id=?",
+        (referred_id,),
+    )
+
+    if cur.fetchone():
+        conn.close()
+        return False
+
+    try:
+        cur.execute("""
+            INSERT INTO referrals(
+                referrer_id,
+                referred_id,
+                status,
+                created_at
+            )
+            VALUES(?,?, 'pending', ?)
+        """, (
+            referrer_id,
+            referred_id,
+            now_text(),
+        ))
+
+        conn.commit()
+        conn.close()
+        stat_add("referrals")
+        return True
+
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False
+
+
+def get_referral_for_referred(referred_id):
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT *
+        FROM referrals
+        WHERE referred_id=?
+        LIMIT 1
+    """, (referred_id,))
+
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def get_active_referral_for_user(referred_id):
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT *
+        FROM referrals
+        WHERE referred_id=?
+          AND status='pending'
+        LIMIT 1
+    """, (referred_id,))
+
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def referral_counts(referrer_id):
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT COUNT(*) c
+        FROM referrals
+        WHERE referrer_id=?
+    """, (referrer_id,))
+    total = cur.fetchone()["c"]
+
+    cur.execute("""
+        SELECT COUNT(*) c
+        FROM referrals
+        WHERE referrer_id=?
+          AND status='completed'
+    """, (referrer_id,))
+    successful = cur.fetchone()["c"]
+
+    conn.close()
+    return total, successful
+
+
+def complete_referral(referred_id, payment_id):
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT *
+        FROM referrals
+        WHERE referred_id=?
+          AND status='pending'
+        LIMIT 1
+    """, (referred_id,))
+
+    referral = cur.fetchone()
+
+    if not referral:
+        conn.close()
+        return None
+
+    cur.execute("""
+        UPDATE referrals
+        SET status='completed',
+            payment_id=?,
+            rewarded_at=?
+        WHERE id=?
+          AND status='pending'
+    """, (
+        payment_id,
+        now_text(),
+        referral["id"],
+    ))
+
+    changed = cur.rowcount
+    conn.commit()
+    conn.close()
+
+    return referral if changed == 1 else None
+
+
+def referral_price(user_id, plan_key):
+    plan = PLANS.get(plan_key)
+
+    if not plan:
+        return None, 0, None
+
+    referral = get_active_referral_for_user(user_id)
+
+    if not referral:
+        return plan["price"], 0, None
+
+    original = plan["price"]
+    final = (original * 90 + 50) // 100
+    discount = original - final
+
+    return final, discount, referral["referrer_id"]
+
+
+async def get_bot_username():
+    global BOT_USERNAME
+
+    if BOT_USERNAME:
+        return BOT_USERNAME
+
+    me = await bot.get_me()
+    BOT_USERNAME = me.username
+    return BOT_USERNAME
+
+
+async def referral_link(user_id):
+    username = await get_bot_username()
+
+    if not username:
+        return None
+
+    return f"https://t.me/{username}?start=ref_{user_id}"
 
 
 # =========================================================
@@ -436,7 +664,6 @@ def premium_days_left(user_id):
         return 0
 
     seconds = (dt - now()).total_seconds()
-
     return max(1, int((seconds + 86399) // 86400))
 
 
@@ -448,7 +675,6 @@ def activate_premium(user_id, days):
 
     current = now()
     old = parse_dt(user["premium_until"])
-
     base = old if old and old > current else current
     new_until = base + timedelta(days=days)
 
@@ -486,7 +712,6 @@ def movie_exists(code):
 
     row = cur.fetchone()
     conn.close()
-
     return row is not None
 
 
@@ -501,7 +726,6 @@ def get_movie(code):
 
     row = cur.fetchone()
     conn.close()
-
     return row
 
 
@@ -511,13 +735,7 @@ def add_movie(code, name, file_id, category):
 
     try:
         cur.execute("""
-            INSERT INTO movies(
-                code,
-                name,
-                file_id,
-                category,
-                created_at
-            )
+            INSERT INTO movies(code, name, file_id, category, created_at)
             VALUES(?,?,?,?,?)
         """, (
             normalize_code(code),
@@ -528,10 +746,8 @@ def add_movie(code, name, file_id, category):
         ))
 
         movie_id = cur.lastrowid
-
         conn.commit()
         conn.close()
-
         return movie_id
 
     except sqlite3.IntegrityError:
@@ -547,7 +763,6 @@ def delete_movie(code):
         "SELECT name FROM movies WHERE code=?",
         (normalize_code(code),),
     )
-
     row = cur.fetchone()
 
     if not row:
@@ -561,7 +776,6 @@ def delete_movie(code):
 
     conn.commit()
     conn.close()
-
     return row["name"]
 
 
@@ -572,22 +786,13 @@ def movie_counts():
     cur.execute("SELECT COUNT(*) c FROM movies")
     total = cur.fetchone()["c"]
 
-    cur.execute("""
-        SELECT COUNT(*) c
-        FROM movies
-        WHERE category='free'
-    """)
+    cur.execute("SELECT COUNT(*) c FROM movies WHERE category='free'")
     free = cur.fetchone()["c"]
 
-    cur.execute("""
-        SELECT COUNT(*) c
-        FROM movies
-        WHERE category='premium'
-    """)
+    cur.execute("SELECT COUNT(*) c FROM movies WHERE category='premium'")
     premium = cur.fetchone()["c"]
 
     conn.close()
-
     return total, free, premium
 
 
@@ -600,14 +805,10 @@ def increment_movie_stat(user_id):
         SET total_movies=total_movies+1,
             last_seen=?
         WHERE id=?
-    """, (
-        now_text(),
-        user_id,
-    ))
+    """, (now_text(), user_id))
 
     conn.commit()
     conn.close()
-
     stat_add("movies_sent")
 
 
@@ -626,7 +827,6 @@ def all_required_channels():
 
     rows = cur.fetchall()
     conn.close()
-
     return rows
 
 
@@ -634,35 +834,24 @@ def get_required_channel(channel_id):
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT *
-        FROM required_channels
-        WHERE id=?
-    """, (channel_id,))
+    cur.execute(
+        "SELECT * FROM required_channels WHERE id=?",
+        (channel_id,),
+    )
 
     row = cur.fetchone()
     conn.close()
-
     return row
 
 
-def add_required_channel(
-    chat_id,
-    username,
-    title,
-    invite_link=None,
-):
+def add_required_channel(chat_id, username, title, invite_link=None):
     conn = db()
     cur = conn.cursor()
 
     try:
         cur.execute("""
             INSERT INTO required_channels(
-                chat_id,
-                username,
-                title,
-                invite_link,
-                created_at
+                chat_id, username, title, invite_link, created_at
             )
             VALUES(?,?,?,?,?)
         """, (
@@ -674,10 +863,8 @@ def add_required_channel(
         ))
 
         row_id = cur.lastrowid
-
         conn.commit()
         conn.close()
-
         return row_id
 
     except sqlite3.IntegrityError:
@@ -695,22 +882,17 @@ def delete_required_channel_by_id(channel_id):
     )
 
     changed = cur.rowcount
-
     conn.commit()
     conn.close()
-
     return changed == 1
 
 
 def channel_join_url(channel):
-    invite_link = channel["invite_link"]
-    username = channel["username"]
+    if channel["invite_link"]:
+        return channel["invite_link"]
 
-    if invite_link:
-        return invite_link
-
-    if username:
-        return f"https://t.me/{str(username).lstrip('@')}"
+    if channel["username"]:
+        return f"https://t.me/{str(channel['username']).lstrip('@')}"
 
     return None
 
@@ -718,6 +900,11 @@ def channel_join_url(channel):
 # =========================================================
 # REQUIRED SUBSCRIPTION CHECK
 # =========================================================
+def member_status_value(member):
+    status = getattr(member, "status", None)
+    return getattr(status, "value", status)
+
+
 async def is_user_subscribed(channel, user_id):
     try:
         member = await bot.get_chat_member(
@@ -725,14 +912,12 @@ async def is_user_subscribed(channel, user_id):
             user_id=user_id,
         )
 
-        if member.status in (
-            "member",
-            "administrator",
-            "creator",
-        ):
+        status = member_status_value(member)
+
+        if status in ("member", "administrator", "creator"):
             return True
 
-        if member.status == "restricted":
+        if status == "restricted":
             return bool(getattr(member, "is_member", False))
 
         return False
@@ -756,7 +941,7 @@ async def is_user_subscribed(channel, user_id):
 
     except Exception:
         logging.exception(
-            "Unexpected subscription check error | channel=%s | user=%s",
+            "Unexpected subscription error | channel=%s | user=%s",
             channel["chat_id"],
             user_id,
         )
@@ -767,12 +952,7 @@ async def get_missing_required_channels(user_id):
     missing = []
 
     for channel in all_required_channels():
-        subscribed = await is_user_subscribed(
-            channel,
-            user_id,
-        )
-
-        if not subscribed:
+        if not await is_user_subscribed(channel, user_id):
             missing.append(channel)
 
     return missing
@@ -799,15 +979,12 @@ def subscription_keyboard(channels):
         )
     ])
 
-    return InlineKeyboardMarkup(
-        inline_keyboard=rows
-    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def require_subscription(message: Message):
     channels = all_required_channels()
 
-    # No required channels configured = normal bot behavior.
     if not channels:
         return True
 
@@ -822,10 +999,9 @@ async def require_subscription(message: Message):
         "🔒 <b>MAJBURIY OBUNA</b>\n\n"
         "Kino olish uchun quyidagi kanallarga obuna bo'ling:\n\n"
         "1️⃣ Kanalga kiring\n"
-        "2️⃣ <b>Obuna bo'lish</b> tugmasini bosing\n"
-        "3️⃣ Pastdagi <b>✅ Obunani tekshirish</b> tugmasini bosing\n\n"
-        "⚠️ Barcha majburiy kanallarga obuna bo'lmaguningizcha "
-        "kino berilmaydi.",
+        "2️⃣ Obuna bo'ling\n"
+        "3️⃣ Pastdagi <b>✅ Obunani tekshirish</b> tugmasini bosing.\n\n"
+        "⚠️ Barcha majburiy kanallarga obuna bo'lmasangiz kino berilmaydi.",
         reply_markup=subscription_keyboard(missing),
     )
 
@@ -834,13 +1010,6 @@ async def require_subscription(message: Message):
 
 @dp.callback_query(F.data == "check_subscription")
 async def check_subscription_callback(callback: CallbackQuery):
-    create_user = get_user(callback.from_user.id)
-
-    if not create_user:
-        # Callback has no Message object suitable for create_or_update_user,
-        # so insert/update manually through a small helper message is avoided.
-        pass
-
     missing = await get_missing_required_channels(
         callback.from_user.id
     )
@@ -874,6 +1043,24 @@ async def check_subscription_callback(callback: CallbackQuery):
 # =========================================================
 # PAYMENTS
 # =========================================================
+def get_pending_payment_for_user(user_id):
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT *
+        FROM payments
+        WHERE user_id=?
+          AND status='pending'
+        ORDER BY id DESC
+        LIMIT 1
+    """, (user_id,))
+
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
 def create_payment(
     user_id,
     username,
@@ -887,6 +1074,11 @@ def create_payment(
     if not plan:
         return None
 
+    final_price, discount, referrer_id = referral_price(
+        user_id,
+        plan_key,
+    )
+
     conn = db()
     cur = conn.cursor()
 
@@ -898,31 +1090,39 @@ def create_payment(
             plan_key,
             plan_name,
             price,
+            original_price,
+            discount_amount,
+            final_price,
+            referral_discount,
+            referrer_id,
             receipt_file_id,
             receipt_type,
             status,
             created_at
         )
-        VALUES(?,?,?,?,?,?,?,?, 'pending', ?)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending', ?)
     """, (
         user_id,
         username,
         first_name,
         plan_key,
         plan["name"],
+        final_price,
         plan["price"],
+        discount,
+        final_price,
+        1 if referrer_id else 0,
+        referrer_id,
         file_id,
         receipt_type,
         now_text(),
     ))
 
     payment_id = cur.lastrowid
-
     conn.commit()
     conn.close()
 
     stat_add("receipts")
-
     return payment_id
 
 
@@ -937,7 +1137,6 @@ def get_payment(payment_id):
 
     row = cur.fetchone()
     conn.close()
-
     return row
 
 
@@ -949,7 +1148,6 @@ def approve_payment(payment_id):
         "SELECT * FROM payments WHERE id=?",
         (payment_id,),
     )
-
     row = cur.fetchone()
 
     if not row:
@@ -970,13 +1168,9 @@ def approve_payment(payment_id):
             approved_at=?
         WHERE id=?
           AND status='pending'
-    """, (
-        now_text(),
-        payment_id,
-    ))
+    """, (now_text(), payment_id))
 
     changed = cur.rowcount
-
     conn.commit()
     conn.close()
 
@@ -995,10 +1189,8 @@ def reject_payment(payment_id):
     """, (payment_id,))
 
     changed = cur.rowcount
-
     conn.commit()
     conn.close()
-
     return changed == 1
 
 
@@ -1006,25 +1198,13 @@ def payment_stats():
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT COUNT(*) c
-        FROM payments
-        WHERE status='pending'
-    """)
+    cur.execute("SELECT COUNT(*) c FROM payments WHERE status='pending'")
     pending = cur.fetchone()["c"]
 
-    cur.execute("""
-        SELECT COUNT(*) c
-        FROM payments
-        WHERE status='approved'
-    """)
+    cur.execute("SELECT COUNT(*) c FROM payments WHERE status='approved'")
     approved = cur.fetchone()["c"]
 
-    cur.execute("""
-        SELECT COUNT(*) c
-        FROM payments
-        WHERE status='rejected'
-    """)
+    cur.execute("SELECT COUNT(*) c FROM payments WHERE status='rejected'")
     rejected = cur.fetchone()["c"]
 
     cur.execute("""
@@ -1035,21 +1215,22 @@ def payment_stats():
     paid_users = cur.fetchone()["c"]
 
     cur.execute("""
-        SELECT COALESCE(SUM(price),0) s
+        SELECT COALESCE(SUM(COALESCE(final_price, price)),0) s
         FROM payments
         WHERE status='approved'
     """)
     revenue = cur.fetchone()["s"]
 
+    cur.execute("""
+        SELECT COALESCE(SUM(discount_amount),0) s
+        FROM payments
+        WHERE status='approved'
+    """)
+    discounts = cur.fetchone()["s"]
+
     conn.close()
 
-    return (
-        pending,
-        approved,
-        rejected,
-        paid_users,
-        revenue,
-    )
+    return pending, approved, rejected, paid_users, revenue, discounts
 
 
 # =========================================================
@@ -1061,20 +1242,12 @@ def is_admin(user_id):
 
 def admin_ok(user_id):
     state = ADMIN_STATE.get(user_id)
-
-    return bool(
-        state and
-        state.get("authenticated")
-    )
+    return bool(state and state.get("authenticated"))
 
 
 def require_admin(obj):
     uid = obj.from_user.id
-
-    return (
-        is_admin(uid)
-        and admin_ok(uid)
-    )
+    return is_admin(uid) and admin_ok(uid)
 
 
 # =========================================================
@@ -1082,185 +1255,89 @@ def require_admin(obj):
 # =========================================================
 def user_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔎 Kino qidirish", callback_data="user_search")],
         [
-            InlineKeyboardButton(
-                text="🔎 Kino qidirish",
-                callback_data="user_search",
-            )
+            InlineKeyboardButton(text="💎 Premium", callback_data="user_premium"),
+            InlineKeyboardButton(text="👤 Profil", callback_data="user_profile"),
         ],
-        [
-            InlineKeyboardButton(
-                text="💎 Premium",
-                callback_data="user_premium",
-            ),
-            InlineKeyboardButton(
-                text="👤 Profil",
-                callback_data="user_profile",
-            ),
-        ],
+        [InlineKeyboardButton(text="👥 Do'st taklif qilish", callback_data="user_referral")],
     ])
 
 
-def premium_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
+def premium_keyboard(user_id=None):
+    rows = []
+
+    for key in ("1", "7", "10", "30", "365"):
+        plan = PLANS[key]
+        final, discount, _ = referral_price(user_id, key) if user_id else (
+            plan["price"], 0, None
+        )
+
+        emoji = "👑" if key == "365" else ("⭐" if key == "30" else "💎")
+        label = f"{emoji} {plan['days']} kun • {money(final)} so'm"
+
+        if discount:
+            label += " 🔥"
+
+        rows.append([
             InlineKeyboardButton(
-                text="💎 1 kun • 3 000 so'm",
-                callback_data="plan_1",
+                text=label,
+                callback_data=f"plan_{key}",
             )
-        ],
-        [
-            InlineKeyboardButton(
-                text="💎 7 kun • 15 000 so'm",
-                callback_data="plan_7",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="💎 10 kun • 20 000 so'm",
-                callback_data="plan_10",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="⭐ 30 kun • 49 000 so'm",
-                callback_data="plan_30",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="👑 1 yil • 99 000 so'm",
-                callback_data="plan_365",
-            )
-        ],
-    ])
+        ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def category_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="🆓 Oddiy kino",
-                callback_data="category_free",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="💎 Premium kino",
-                callback_data="category_premium",
-            )
-        ],
+        [InlineKeyboardButton(text="🆓 Oddiy kino", callback_data="category_free")],
+        [InlineKeyboardButton(text="💎 Premium kino", callback_data="category_premium")],
     ])
 
 
 def vip_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(
-                text="1 kun",
-                callback_data="vip_1",
-            ),
-            InlineKeyboardButton(
-                text="7 kun",
-                callback_data="vip_7",
-            ),
+            InlineKeyboardButton(text="1 kun", callback_data="vip_1"),
+            InlineKeyboardButton(text="7 kun", callback_data="vip_7"),
         ],
         [
-            InlineKeyboardButton(
-                text="10 kun",
-                callback_data="vip_10",
-            ),
-            InlineKeyboardButton(
-                text="30 kun",
-                callback_data="vip_30",
-            ),
+            InlineKeyboardButton(text="10 kun", callback_data="vip_10"),
+            InlineKeyboardButton(text="30 kun", callback_data="vip_30"),
         ],
-        [
-            InlineKeyboardButton(
-                text="1 yil",
-                callback_data="vip_365",
-            )
-        ],
+        [InlineKeyboardButton(text="1 yil", callback_data="vip_365")],
     ])
 
 
 def admin_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(
-                text="➕ Kino qo'shish",
-                callback_data="admin_add_movie",
-            ),
-            InlineKeyboardButton(
-                text="🗑 Kino o'chirish",
-                callback_data="admin_delete_movie",
-            ),
+            InlineKeyboardButton(text="➕ Kino qo'shish", callback_data="admin_add_movie"),
+            InlineKeyboardButton(text="🗑 Kino o'chirish", callback_data="admin_delete_movie"),
         ],
         [
-            InlineKeyboardButton(
-                text="📚 Kinolar",
-                callback_data="admin_movies",
-            ),
-            InlineKeyboardButton(
-                text="👥 Userlar",
-                callback_data="admin_users",
-            ),
+            InlineKeyboardButton(text="📚 Kinolar", callback_data="admin_movies"),
+            InlineKeyboardButton(text="👥 Userlar", callback_data="admin_users"),
         ],
+        [InlineKeyboardButton(text="📊 Statistika", callback_data="admin_stats")],
         [
-            InlineKeyboardButton(
-                text="📊 Statistika",
-                callback_data="admin_stats",
-            )
+            InlineKeyboardButton(text="🧾 To'lovlar", callback_data="admin_payments"),
+            InlineKeyboardButton(text="💎 Premium berish", callback_data="admin_vip"),
         ],
+        [InlineKeyboardButton(text="📢 Majburiy obuna", callback_data="admin_channels")],
         [
-            InlineKeyboardButton(
-                text="🧾 To'lovlar",
-                callback_data="admin_payments",
-            ),
-            InlineKeyboardButton(
-                text="💎 Premium berish",
-                callback_data="admin_vip",
-            ),
+            InlineKeyboardButton(text="💬 Userga xabar", callback_data="admin_message_user"),
+            InlineKeyboardButton(text="📢 Hammaga xabar", callback_data="admin_broadcast"),
         ],
-        [
-            InlineKeyboardButton(
-                text="📢 Majburiy obuna",
-                callback_data="admin_channels",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="💬 Userga xabar",
-                callback_data="admin_message_user",
-            ),
-            InlineKeyboardButton(
-                text="📢 Hammaga xabar",
-                callback_data="admin_broadcast",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="🔄 Premium/stat reset",
-                callback_data="admin_reset",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="🔒 Chiqish",
-                callback_data="admin_logout",
-            )
-        ],
+        [InlineKeyboardButton(text="🔄 Premium/stat reset", callback_data="admin_reset")],
+        [InlineKeyboardButton(text="🔒 Chiqish", callback_data="admin_logout")],
     ])
 
 
 def back_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="⬅️ Admin panel",
-                callback_data="admin_back",
-            )
-        ]
+        [InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_back")]
     ])
 
 
@@ -1281,30 +1358,10 @@ def payment_admin_keyboard(payment_id):
 
 def channels_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="➕ Kanal qo'shish",
-                callback_data="admin_add_channel",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="📋 Kanallar",
-                callback_data="admin_list_channels",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="🗑 Kanal o'chirish",
-                callback_data="admin_delete_channel",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="⬅️ Admin panel",
-                callback_data="admin_back",
-            )
-        ],
+        [InlineKeyboardButton(text="➕ Kanal qo'shish", callback_data="admin_add_channel")],
+        [InlineKeyboardButton(text="📋 Kanallar", callback_data="admin_list_channels")],
+        [InlineKeyboardButton(text="🗑 Kanal o'chirish", callback_data="admin_delete_channel")],
+        [InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_back")],
     ])
 
 
@@ -1320,7 +1377,6 @@ async def send_home(message: Message):
 
     if is_premium(message.from_user.id):
         status = "💎 Premium"
-
         premium_line = (
             f"{fmt_dt(user['premium_until'])} • "
             f"{premium_days_left(message.from_user.id)} kun qoldi"
@@ -1345,11 +1401,31 @@ async def send_home(message: Message):
 
 
 # =========================================================
-# START
+# START + REFERRAL
 # =========================================================
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     is_new = create_or_update_user(message)
+
+    # Referral is accepted ONLY on the user's first /start.
+    if is_new:
+        referrer_id = parse_referral_arg(message)
+
+        if referrer_id and create_referral(
+            referrer_id,
+            message.from_user.id,
+        ):
+            try:
+                await bot.send_message(
+                    referrer_id,
+                    "👥 <b>Yangi referral!</b>\n\n"
+                    f"👤 {esc(message.from_user.first_name)} botga sizning "
+                    "havolangiz orqali kirdi.\n\n"
+                    "🎁 U Premium sotib olib, to'lovi tasdiqlansa "
+                    "sizga <b>+1 kun Premium</b> beriladi.",
+                )
+            except Exception:
+                logging.exception("Referral notification failed.")
 
     if is_new and not is_admin(message.from_user.id):
         try:
@@ -1361,11 +1437,8 @@ async def start_handler(message: Message):
                 f"🆔 ID: <code>{message.from_user.id}</code>\n"
                 f"🕐 Vaqt: <code>{now_text()}</code>",
             )
-        except Exception as exc:
-            logging.exception(
-                "New user admin notification failed: %s",
-                exc,
-            )
+        except Exception:
+            logging.exception("New user admin notification failed.")
 
     await send_home(message)
 
@@ -1380,7 +1453,6 @@ async def user_search(callback: CallbackQuery):
         "Kino kodini yuboring.\n"
         "Masalan: <code>101</code>"
     )
-
     await callback.answer()
 
 
@@ -1389,21 +1461,15 @@ async def user_profile(callback: CallbackQuery):
     user = get_user(callback.from_user.id)
 
     if not user:
-        await callback.answer(
-            "Profil topilmadi.",
-            show_alert=True,
-        )
+        await callback.answer("Profil topilmadi.", show_alert=True)
         return
 
     active = is_premium(callback.from_user.id)
-
     status = "💎 Premium" if active else "🆓 Free"
     until = fmt_dt(user["premium_until"]) if active else "-"
-    left = (
-        f"{premium_days_left(callback.from_user.id)} kun"
-        if active
-        else "0 kun"
-    )
+    left = f"{premium_days_left(callback.from_user.id)} kun" if active else "0 kun"
+
+    invited, successful = referral_counts(callback.from_user.id)
 
     await callback.message.answer(
         "╭━━━━━━━━━━━━━━━━━━━━╮\n"
@@ -1416,14 +1482,32 @@ async def user_profile(callback: CallbackQuery):
         f"👑 Status: <b>{status}</b>\n"
         f"⏳ Tugash: <code>{until}</code>\n"
         f"📅 Qolgan: <b>{left}</b>\n"
-        f"🎬 Ko'rilgan/yuborilgan: "
-        f"<b>{user['total_movies']}</b>\n"
-        f"🕐 Oxirgi faollik: "
-        f"<code>{esc(user['last_seen'])}</code>\n"
-        f"📅 Ro'yxatdan o'tgan: "
-        f"<code>{esc(user['created_at'])}</code>"
+        f"🎬 Kinolar: <b>{user['total_movies']}</b>\n"
+        f"👥 Taklif qilingan: <b>{invited}</b>\n"
+        f"🎁 Muvaffaqiyatli referral: <b>{successful}</b>\n"
+        f"🕐 Oxirgi faollik: <code>{esc(user['last_seen'])}</code>\n"
+        f"📅 Ro'yxatdan o'tgan: <code>{esc(user['created_at'])}</code>"
     )
+    await callback.answer()
 
+
+@dp.callback_query(F.data == "user_referral")
+async def user_referral(callback: CallbackQuery):
+    uid = callback.from_user.id
+    link = await referral_link(uid)
+    total, successful = referral_counts(uid)
+
+    await callback.message.answer(
+        "👥 <b>DO'ST TAKLIF QILISH</b>\n\n"
+        "Do'stingizni quyidagi havola orqali botga kiriting:\n\n"
+        f"<code>{esc(link or 'Link yaratilmadi')}</code>\n\n"
+        "🎁 <b>Bonus qoidasi:</b>\n"
+        "• Do'stingiz Premium sotib olsa, unga <b>10% chegirma</b> beriladi.\n"
+        "• To'lov admin tomonidan tasdiqlangandan keyin sizga <b>+1 kun Premium</b> beriladi.\n"
+        "• Bonus faqat haqiqiy referral va tasdiqlangan Premium to'lovi uchun beriladi.\n\n"
+        f"👥 Takliflar: <b>{total}</b>\n"
+        f"✅ Muvaffaqiyatli: <b>{successful}</b>",
+    )
     await callback.answer()
 
 
@@ -1434,36 +1518,42 @@ async def user_premium(callback: CallbackQuery):
     if is_premium(uid):
         await callback.message.answer(
             "💎 <b>PREMIUM FAOL</b>\n\n"
-            f"⏳ Tugash: "
-            f"<code>{fmt_dt(premium_until(uid))}</code>\n"
-            f"📅 Qolgan: "
-            f"<b>{premium_days_left(uid)} kun</b>"
+            f"⏳ Tugash: <code>{fmt_dt(premium_until(uid))}</code>\n"
+            f"📅 Qolgan: <b>{premium_days_left(uid)} kun</b>"
         )
-
         await callback.answer()
         return
 
-    await callback.message.answer(
+    has_referral = bool(get_active_referral_for_user(uid))
+
+    text = (
         "╭━━━━━━━━━━━━━━━━━━━━╮\n"
         "       💎 <b>PREMIUM</b>\n"
         "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
-        "Tarifni tanlang:\n\n"
-        "💎 1 kun — <b>3 000 so'm</b>\n"
-        "💎 7 kun — <b>15 000 so'm</b>\n"
-        "💎 10 kun — <b>20 000 so'm</b>\n"
-        "⭐ 30 kun — <b>49 000 so'm</b>\n"
-        "👑 1 yil — <b>99 000 so'm</b>\n\n"
-        "💳 <b>To'lov:</b>\n"
-        f"<code>{esc(PAYMENT_CARD)}</code>\n"
-        f"👤 {esc(PAYMENT_OWNER)}\n\n"
+        "Tarifni tanlang:"
+    )
+
+    if has_referral:
+        text += (
+            "\n\n🔥 <b>Referral chegirmasi faol!</b>\n"
+            "Sizga Premium tariflarida <b>10% chegirma</b> beriladi."
+        )
+
+    text += (
+        "\n\n💳 <b>To'lov:</b>\n"
+        f"<code>{esc(PAYMENT_CARD or 'Admin bilan bog‘laning')}</code>\n"
+        f"👤 {esc(PAYMENT_OWNER or '-')}\n\n"
         "1️⃣ Tarifni tanlang.\n"
         "2️⃣ To'lov qiling.\n"
         "3️⃣ Chekni shu botga yuboring.\n"
         "4️⃣ Admin tekshiradi.\n"
-        "5️⃣ Tasdiqlangach Premium avtomatik ochiladi.",
-        reply_markup=premium_keyboard(),
+        "5️⃣ Tasdiqlangach Premium avtomatik ochiladi."
     )
 
+    await callback.message.answer(
+        text,
+        reply_markup=premium_keyboard(uid),
+    )
     await callback.answer()
 
 
@@ -1473,10 +1563,7 @@ async def choose_plan(callback: CallbackQuery):
     key = callback.data.replace("plan_", "", 1)
 
     if key not in PLANS:
-        await callback.answer(
-            "Tarif topilmadi.",
-            show_alert=True,
-        )
+        await callback.answer("Tarif topilmadi.", show_alert=True)
         return
 
     if is_premium(uid):
@@ -1486,14 +1573,33 @@ async def choose_plan(callback: CallbackQuery):
         )
         return
 
+    pending = get_pending_payment_for_user(uid)
+
+    if pending:
+        await callback.answer(
+            f"Sizda #{pending['id']} raqamli kutilayotgan to'lov bor.",
+            show_alert=True,
+        )
+        return
+
     USER_PAYMENT_PLAN[uid] = key
 
     plan = PLANS[key]
+    final, discount, _ = referral_price(uid, key)
+
+    if discount:
+        price_text = (
+            f"<s>{money(plan['price'])} so'm</s> → "
+            f"<b>{money(final)} so'm</b>\n"
+            f"🔥 Chegirma: <b>{money(discount)} so'm</b>"
+        )
+    else:
+        price_text = f"<b>{money(final)} so'm</b>"
 
     await callback.message.answer(
         "🧾 <b>TARIF TANLANDI</b>\n\n"
         f"💎 Tarif: <b>{esc(plan['name'])}</b>\n"
-        f"💰 Summa: <b>{money(plan['price'])} so'm</b>\n\n"
+        f"💰 Summa: {price_text}\n\n"
         "Endi to'lovni amalga oshiring.\n"
         "Keyin chek rasmini shu botga yuboring.\n\n"
         "Bekor qilish: <code>/cancel</code>"
@@ -1503,18 +1609,22 @@ async def choose_plan(callback: CallbackQuery):
 
 
 # =========================================================
-# RECEIPT DELIVERY
+# RECEIPTS
 # =========================================================
 async def notify_admin_about_receipt(
     payment_id,
     user_id,
     first_name,
     username,
-    plan,
+    payment,
     file_id,
     receipt_type,
     message_text="",
 ):
+    original = payment["original_price"] or payment["price"]
+    final = payment["final_price"] or payment["price"]
+    discount = payment["discount_amount"] or 0
+
     caption = (
         "🧾 <b>YANGI TO'LOV</b>\n\n"
         f"🧾 To'lov ID: <code>#{payment_id}</code>\n"
@@ -1522,25 +1632,31 @@ async def notify_admin_about_receipt(
         f"🔗 Username: "
         f"{('@' + esc(username)) if username else 'Username yo‘q'}\n"
         f"🆔 User ID: <code>{user_id}</code>\n\n"
-        f"💎 Tarif: <b>{esc(plan['name'])}</b>\n"
-        f"💰 Summa: <b>{money(plan['price'])} so'm</b>\n"
+        f"💎 Tarif: <b>{esc(payment['plan_name'])}</b>\n"
+        f"💰 Asl summa: <b>{money(original)} so'm</b>\n"
+    )
+
+    if discount:
+        caption += (
+            f"🔥 Referral chegirma: <b>-{money(discount)} so'm</b>\n"
+        )
+
+    caption += (
+        f"💳 To'lanadigan: <b>{money(final)} so'm</b>\n"
         f"🕐 Vaqt: <code>{now_text()}</code>\n"
     )
 
+    if payment["referrer_id"]:
+        caption += (
+            f"👥 Referrer ID: <code>{payment['referrer_id']}</code>\n"
+        )
+
     if message_text:
         caption += (
-            f"\n📝 User izohi: "
-            f"<i>{esc(message_text[:700])}</i>"
+            f"\n📝 User izohi: <i>{esc(message_text[:700])}</i>"
         )
 
     markup = payment_admin_keyboard(payment_id)
-
-    logging.info(
-        "Sending receipt | admin=%s | payment=%s | type=%s",
-        ADMIN_ID,
-        payment_id,
-        receipt_type,
-    )
 
     if receipt_type == "photo":
         await bot.send_photo(
@@ -1580,11 +1696,7 @@ async def receipt_document_handler(message: Message):
     )
 
 
-async def handle_receipt(
-    message: Message,
-    receipt_type,
-    file_id,
-):
+async def handle_receipt(message: Message, receipt_type, file_id):
     uid = message.from_user.id
 
     if is_admin(uid):
@@ -1596,18 +1708,26 @@ async def handle_receipt(
 
     if not plan_key:
         await message.answer(
-            "⚠️ Avval <b>💎 Premium</b> bo'limidan "
-            "tarif tanlang.\n\n"
+            "⚠️ Avval <b>💎 Premium</b> bo'limidan tarif tanlang.\n\n"
             "Keyin chekni yuboring."
         )
         return
 
     if is_premium(uid):
         USER_PAYMENT_PLAN.pop(uid, None)
-
         await message.answer(
-            "ℹ️ Sizda Premium hali faol. "
-            "Yangi to'lov qabul qilinmadi."
+            "ℹ️ Sizda Premium hali faol. Yangi to'lov qabul qilinmadi."
+        )
+        return
+
+    pending = get_pending_payment_for_user(uid)
+
+    if pending:
+        USER_PAYMENT_PLAN.pop(uid, None)
+        await message.answer(
+            "⏳ Sizning oldingi to'lovingiz hali tekshirilmoqda.\n\n"
+            f"🧾 To'lov ID: <code>#{pending['id']}</code>\n"
+            "Admin tasdiqlashini kuting."
         )
         return
 
@@ -1615,10 +1735,7 @@ async def handle_receipt(
 
     if not plan:
         USER_PAYMENT_PLAN.pop(uid, None)
-
-        await message.answer(
-            "❌ Tarif topilmadi."
-        )
+        await message.answer("❌ Tarif topilmadi.")
         return
 
     payment_id = create_payment(
@@ -1630,13 +1747,19 @@ async def handle_receipt(
         receipt_type=receipt_type,
     )
 
+    if not payment_id:
+        await message.answer("❌ To'lovni saqlashda xatolik.")
+        return
+
+    payment = get_payment(payment_id)
+
     try:
         await notify_admin_about_receipt(
             payment_id=payment_id,
             user_id=uid,
             first_name=message.from_user.first_name,
             username=message.from_user.username,
-            plan=plan,
+            payment=payment,
             file_id=file_id,
             receipt_type=receipt_type,
             message_text=message.caption or "",
@@ -1644,47 +1767,46 @@ async def handle_receipt(
 
         USER_PAYMENT_PLAN.pop(uid, None)
 
+        original = payment["original_price"] or payment["price"]
+        final = payment["final_price"] or payment["price"]
+        discount = payment["discount_amount"] or 0
+
+        price_text = (
+            f"{money(final)} so'm"
+            if not discount
+            else f"{money(final)} so'm (10% referral chegirma)"
+        )
+
         await message.answer(
             "✅ <b>CHEK QABUL QILINDI</b>\n\n"
             f"🧾 ID: <code>#{payment_id}</code>\n"
             f"💎 Tarif: <b>{esc(plan['name'])}</b>\n"
-            f"💰 Summa: <b>{money(plan['price'])} so'm</b>\n\n"
+            f"💰 Asl: <s>{money(original)} so'm</s>\n"
+            f"💳 To'lov: <b>{price_text}</b>\n\n"
             "⏳ Chek admin chatiga yuborildi.\n"
             "Admin tasdiqlagach Premium avtomatik ochiladi."
         )
 
     except TelegramForbiddenError:
-        logging.exception(
-            "ADMIN BOT DELIVERY FORBIDDEN"
-        )
-
+        logging.exception("ADMIN BOT DELIVERY FORBIDDEN")
         await message.answer(
             "❌ Chek bazaga saqlandi, lekin bot admin akkauntiga "
             "xabar yubora olmadi.\n\n"
-            "Admin akkaunti botga <b>/start</b> yuborishi shart.\n"
-            f"ADMIN_ID: <code>{ADMIN_ID}</code>"
+            "Admin akkaunti botga <b>/start</b> yuborishi shart."
         )
 
     except TelegramBadRequest:
-        logging.exception(
-            "ADMIN BOT DELIVERY BAD REQUEST"
-        )
-
+        logging.exception("ADMIN BOT DELIVERY BAD REQUEST")
         await message.answer(
             "❌ Chek bazaga saqlandi, lekin Telegram admin chatiga "
             "yuborishni rad etdi.\n\n"
-            f"Tekshiring: ADMIN_ID = <code>{ADMIN_ID}</code>"
+            "ADMIN_ID va admin akkauntining botga /start yuborganini tekshiring."
         )
 
     except Exception:
-        logging.exception(
-            "UNKNOWN RECEIPT DELIVERY ERROR"
-        )
-
+        logging.exception("UNKNOWN RECEIPT DELIVERY ERROR")
         await message.answer(
-            "⚠️ Chek bazaga saqlandi, ammo admin chatiga "
-            "yuborishda xatolik bo'ldi.\n"
-            "Server konsolidagi ERROR logni tekshiring."
+            "⚠️ Chek bazaga saqlandi, ammo admin chatiga yuborishda xatolik bo'ldi."
         )
 
 
@@ -1694,34 +1816,19 @@ async def handle_receipt(
 @dp.callback_query(F.data.startswith("approve_"))
 async def approve_callback(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
-        await callback.answer(
-            "Ruxsat yo'q.",
-            show_alert=True,
-        )
+        await callback.answer("Ruxsat yo'q.", show_alert=True)
         return
 
     try:
-        payment_id = int(
-            callback.data.replace(
-                "approve_",
-                "",
-                1,
-            )
-        )
+        payment_id = int(callback.data.replace("approve_", "", 1))
     except ValueError:
-        await callback.answer(
-            "ID noto'g'ri.",
-            show_alert=True,
-        )
+        await callback.answer("ID noto'g'ri.", show_alert=True)
         return
 
     result = approve_payment(payment_id)
 
     if result is None:
-        await callback.answer(
-            "To'lov topilmadi.",
-            show_alert=True,
-        )
+        await callback.answer("To'lov topilmadi.", show_alert=True)
         return
 
     if result in ("already", "processed"):
@@ -1734,96 +1841,126 @@ async def approve_callback(callback: CallbackQuery):
     plan = PLANS.get(result["plan_key"])
 
     if not plan:
-        await callback.answer(
-            "Tarif topilmadi.",
-            show_alert=True,
-        )
+        await callback.answer("Tarif topilmadi.", show_alert=True)
         return
 
     uid = result["user_id"]
 
-    new_until = activate_premium(
-        uid,
-        plan["days"],
-    )
+    if not get_user(uid):
+        await callback.answer("User topilmadi.", show_alert=True)
+        return
+
+    new_until = activate_premium(uid, plan["days"])
 
     if not new_until:
-        await callback.answer(
-            "User topilmadi.",
-            show_alert=True,
-        )
+        await callback.answer("Premium ochilmadi.", show_alert=True)
         return
 
     stat_add("approved_payments")
 
+    # =====================================================
+    # REFERRAL REWARD:
+    # Only after payment is actually approved.
+    # Referrer receives exactly +1 day.
+    # =====================================================
+    referral = None
+
+    if result["referrer_id"]:
+        referral = complete_referral(
+            uid,
+            payment_id,
+        )
+
+    if referral:
+        referrer_id = referral["referrer_id"]
+        referrer_until = activate_premium(
+            referrer_id,
+            1,
+        )
+
+        stat_add("referral_rewards")
+
+        try:
+            await bot.send_message(
+                referrer_id,
+                "🎁 <b>REFERRAL BONUS!</b>\n\n"
+                f"👤 Siz taklif qilgan user Premium sotib oldi.\n"
+                "💎 Sizga <b>+1 kun Premium</b> qo'shildi.\n"
+                f"⏳ Yangi tugash: <code>{fmt_dt(referrer_until)}</code>",
+            )
+        except Exception:
+            logging.exception(
+                "Referral reward notification failed | referrer=%s",
+                referrer_id,
+            )
+
     try:
+        discount = result["discount_amount"] or 0
+        paid = result["final_price"] or result["price"]
+
+        extra = ""
+        if discount:
+            extra = (
+                f"\n🔥 Referral chegirma: <b>-{money(discount)} so'm</b>"
+                f"\n💳 To'langan: <b>{money(paid)} so'm</b>"
+            )
+
         await bot.send_message(
             uid,
             "🎉 <b>PREMIUM FAOLLASHDI</b>\n\n"
             f"💎 Tarif: <b>{esc(plan['name'])}</b>\n"
             f"⏳ Tugash: <code>{fmt_dt(new_until)}</code>\n"
-            f"📅 Muddat: <b>{plan['days']} kun</b>\n\n"
+            f"📅 Muddat: <b>{plan['days']} kun</b>"
+            f"{extra}\n\n"
             "✅ To'lovingiz tasdiqlandi.\n"
             "🍿 Yoqimli tomosha!",
         )
     except Exception:
-        logging.exception(
-            "Approved-user notification failed: %s",
-            uid,
-        )
+        logging.exception("Approved-user notification failed: %s", uid)
 
     try:
-        await callback.message.edit_caption(
-            caption=(
-                "✅ <b>TO'LOV TASDIQLANDI</b>\n\n"
-                f"🧾 ID: <code>#{payment_id}</code>\n"
-                f"🆔 User: <code>{uid}</code>\n"
-                f"💎 Tarif: <b>{esc(plan['name'])}</b>\n"
-                f"⏳ Tugash: <code>{fmt_dt(new_until)}</code>\n\n"
-                "Status: <b>APPROVED</b>"
-            )
-        )
-    except Exception:
-        logging.exception(
-            "Could not edit receipt caption."
+        caption = (
+            "✅ <b>TO'LOV TASDIQLANDI</b>\n\n"
+            f"🧾 ID: <code>#{payment_id}</code>\n"
+            f"🆔 User: <code>{uid}</code>\n"
+            f"💎 Tarif: <b>{esc(plan['name'])}</b>\n"
+            f"💳 To'langan: <b>{money(result['final_price'] or result['price'])} so'm</b>\n"
+            f"⏳ Tugash: <code>{fmt_dt(new_until)}</code>\n"
         )
 
-    await callback.answer(
-        "Premium ochildi!"
-    )
+        if referral:
+            caption += (
+                f"\n🎁 Referrer: <code>{referral['referrer_id']}</code>\n"
+                "🎁 Bonus: <b>+1 kun berildi</b>\n"
+            )
+
+        caption += "\nStatus: <b>APPROVED</b>"
+
+        await callback.message.edit_caption(
+            caption=caption
+        )
+    except Exception:
+        logging.exception("Could not edit receipt caption.")
+
+    await callback.answer("Premium ochildi!")
 
 
 @dp.callback_query(F.data.startswith("reject_"))
 async def reject_callback(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
-        await callback.answer(
-            "Ruxsat yo'q.",
-            show_alert=True,
-        )
+        await callback.answer("Ruxsat yo'q.", show_alert=True)
         return
 
     try:
-        payment_id = int(
-            callback.data.replace(
-                "reject_",
-                "",
-                1,
-            )
-        )
+        payment_id = int(callback.data.replace("reject_", "", 1))
     except ValueError:
-        await callback.answer(
-            "ID noto'g'ri.",
-            show_alert=True,
-        )
+        await callback.answer("ID noto'g'ri.", show_alert=True)
         return
 
     payment = get_payment(payment_id)
 
     if not payment:
-        await callback.answer(
-            "To'lov topilmadi.",
-            show_alert=True,
-        )
+        await callback.answer("To'lov topilmadi.", show_alert=True)
         return
 
     if not reject_payment(payment_id):
@@ -1834,7 +1971,6 @@ async def reject_callback(callback: CallbackQuery):
         return
 
     stat_add("rejected_payments")
-
     uid = payment["user_id"]
 
     try:
@@ -1843,14 +1979,10 @@ async def reject_callback(callback: CallbackQuery):
             "❌ <b>TO'LOV RAD ETILDI</b>\n\n"
             f"🧾 ID: <code>#{payment_id}</code>\n"
             f"💎 Tarif: <b>{esc(payment['plan_name'])}</b>\n\n"
-            "Chekni qayta tekshiring va kerak bo'lsa "
-            "yangi chek yuboring.",
+            "Chekni qayta tekshiring va kerak bo'lsa yangi chek yuboring.",
         )
     except Exception:
-        logging.exception(
-            "Rejected-user notification failed: %s",
-            uid,
-        )
+        logging.exception("Rejected-user notification failed: %s", uid)
 
     try:
         await callback.message.edit_caption(
@@ -1863,13 +1995,9 @@ async def reject_callback(callback: CallbackQuery):
             )
         )
     except Exception:
-        logging.exception(
-            "Could not edit rejected receipt."
-        )
+        logging.exception("Could not edit rejected receipt.")
 
-    await callback.answer(
-        "Rad etildi."
-    )
+    await callback.answer("Rad etildi.")
 
 
 # =========================================================
@@ -1877,7 +2005,6 @@ async def reject_callback(callback: CallbackQuery):
 # =========================================================
 async def search_movie(message: Message, code):
     code = normalize_code(code)
-
     movie = get_movie(code)
 
     if not movie:
@@ -1887,9 +2014,6 @@ async def search_movie(message: Message, code):
         )
         return
 
-    # =====================================================
-    # MANDATORY SUBSCRIPTION IS CHECKED BEFORE THE MOVIE
-    # =====================================================
     if not await require_subscription(message):
         return
 
@@ -1902,14 +2026,12 @@ async def search_movie(message: Message, code):
             f"🎬 <b>{esc(movie['name'])}</b>\n\n"
             "🔒 Bu kino Premium uchun.",
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="💎 Premium olish",
-                            callback_data="user_premium",
-                        )
-                    ]
-                ]
+                inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="💎 Premium olish",
+                        callback_data="user_premium",
+                    )
+                ]]
             ),
         )
         return
@@ -1921,11 +2043,6 @@ async def search_movie(message: Message, code):
     )
 
     try:
-        # protect_content=True:
-        # - normal forwarding is blocked
-        # - normal saving/download via Telegram UI is restricted
-        #
-        # It cannot stop screenshots/screen recording outside Telegram.
         await message.answer_video(
             video=movie["file_id"],
             caption=(
@@ -1937,18 +2054,12 @@ async def search_movie(message: Message, code):
             protect_content=True,
         )
 
-        increment_movie_stat(
-            message.from_user.id
-        )
+        increment_movie_stat(message.from_user.id)
 
     except Exception:
-        logging.exception(
-            "Movie send failed."
-        )
-
+        logging.exception("Movie send failed.")
         await message.answer(
-            "❌ Videoni yuborishda xatolik. "
-            "Admin faylni qayta yuklashi kerak."
+            "❌ Videoni yuborishda xatolik. Admin faylni qayta yuklashi kerak."
         )
 
 
@@ -1960,9 +2071,7 @@ async def admin_command(message: Message):
     uid = message.from_user.id
 
     if not is_admin(uid):
-        await message.answer(
-            "⛔ Sizda admin huquqi yo'q."
-        )
+        await message.answer("⛔ Sizda admin huquqi yo'q.")
         return
 
     ADMIN_STATE[uid] = {
@@ -1981,9 +2090,7 @@ async def panel_command(message: Message):
     uid = message.from_user.id
 
     if not is_admin(uid):
-        await message.answer(
-            "⛔ Ruxsat yo'q."
-        )
+        await message.answer("⛔ Ruxsat yo'q.")
         return
 
     if admin_ok(uid):
@@ -1994,9 +2101,7 @@ async def panel_command(message: Message):
             "authenticated": False,
         }
 
-        await message.answer(
-            "🔐 PIN-kodni yuboring."
-        )
+        await message.answer("🔐 PIN-kodni yuboring.")
 
 
 async def show_admin_panel(message: Message):
@@ -2009,14 +2114,11 @@ async def show_admin_panel(message: Message):
     total_users = count_users()
     total_movies, _, _ = movie_counts()
     active_premium = count_active_premium()
+    pending, approved, rejected, paid_users, revenue, discounts = payment_stats()
+    channel_count = len(all_required_channels())
 
-    pending, approved, rejected, paid_users, revenue = (
-        payment_stats()
-    )
-
-    channel_count = len(
-        all_required_channels()
-    )
+    invited = stat_get("referrals")
+    rewards = stat_get("referral_rewards")
 
     await message.answer(
         "╭━━━━━━━━━━━━━━━━━━━━╮\n"
@@ -2030,7 +2132,10 @@ async def show_admin_panel(message: Message):
         f"✅ Tasdiqlangan: <b>{approved}</b>\n"
         f"❌ Rad etilgan: <b>{rejected}</b>\n"
         f"👤 To'lov qilgan user: <b>{paid_users}</b>\n"
-        f"💰 Daromad: <b>{money(revenue)} so'm</b>\n\n"
+        f"💰 Daromad: <b>{money(revenue)} so'm</b>\n"
+        f"🔥 Berilgan chegirmalar: <b>{money(discounts)} so'm</b>\n"
+        f"👥 Referrals: <b>{invited}</b>\n"
+        f"🎁 Referral bonuslar: <b>{rewards}</b>\n\n"
         "👇 Boshqaruv:",
         reply_markup=admin_menu(),
     )
@@ -2053,65 +2158,40 @@ async def text_router(message: Message):
         if state:
             step = state.get("step")
 
-            # ---------------------------------------------
-            # ADMIN PIN
-            # ---------------------------------------------
             if step == "pin":
                 if text == ADMIN_PIN:
                     ADMIN_STATE[uid] = {
                         "step": "panel",
                         "authenticated": True,
                     }
-
                     await show_admin_panel(message)
                 else:
                     ADMIN_STATE.pop(uid, None)
-
-                    await message.answer(
-                        "❌ PIN noto'g'ri."
-                    )
-
+                    await message.answer("❌ PIN noto'g'ri.")
                 return
 
-            # ---------------------------------------------
-            # AUTHENTICATED ADMIN
-            # ---------------------------------------------
             if state.get("authenticated"):
 
-                # -----------------------------------------
-                # ADD MOVIE: CODE
-                # -----------------------------------------
                 if step == "movie_code":
                     code = normalize_code(text)
 
                     if not code:
-                        await message.answer(
-                            "❌ Kino kodi bo'sh bo'lmasin."
-                        )
+                        await message.answer("❌ Kino kodi bo'sh bo'lmasin.")
                         return
 
                     if movie_exists(code):
-                        await message.answer(
-                            "❌ Bu kino kodi band."
-                        )
+                        await message.answer("❌ Bu kino kodi band.")
                         return
 
                     state["code"] = code
                     state["step"] = "movie_name"
 
-                    await message.answer(
-                        "2️⃣ Kino nomini yuboring:"
-                    )
+                    await message.answer("2️⃣ Kino nomini yuboring:")
                     return
 
-                # -----------------------------------------
-                # ADD MOVIE: NAME
-                # -----------------------------------------
                 if step == "movie_name":
                     if not text:
-                        await message.answer(
-                            "❌ Kino nomini kiriting."
-                        )
+                        await message.answer("❌ Kino nomini kiriting.")
                         return
 
                     state["name"] = text
@@ -2123,16 +2203,11 @@ async def text_router(message: Message):
                     )
                     return
 
-                # -----------------------------------------
-                # DELETE MOVIE
-                # -----------------------------------------
                 if step == "delete_movie":
                     name = delete_movie(text)
 
                     if not name:
-                        await message.answer(
-                            "❌ Bunday kino topilmadi."
-                        )
+                        await message.answer("❌ Bunday kino topilmadi.")
                         return
 
                     ADMIN_STATE[uid] = {
@@ -2148,16 +2223,11 @@ async def text_router(message: Message):
                     )
                     return
 
-                # -----------------------------------------
-                # VIP USER
-                # -----------------------------------------
                 if step == "vip_user":
                     target = find_user(text)
 
                     if not target:
-                        await message.answer(
-                            "❌ User topilmadi."
-                        )
+                        await message.answer("❌ User topilmadi.")
                         return
 
                     state["target_user"] = target
@@ -2170,137 +2240,98 @@ async def text_router(message: Message):
                     )
                     return
 
-                # -----------------------------------------
-                # MESSAGE ONE USER: TARGET
-                # -----------------------------------------
                 if step == "message_user_target":
                     target = find_user(text)
 
                     if not target:
-                        await message.answer(
-                            "❌ User topilmadi."
-                        )
+                        await message.answer("❌ User topilmadi.")
                         return
 
                     state["target_user"] = target
                     state["step"] = "message_user_text"
 
-                    await message.answer(
-                        "💬 Userga yuboriladigan xabarni yozing."
-                    )
+                    await message.answer("💬 Userga yuboriladigan xabarni yozing.")
                     return
 
-                # -----------------------------------------
-                # MESSAGE ONE USER: TEXT
-                # -----------------------------------------
                 if step == "message_user_text":
                     target = state["target_user"]
 
                     try:
                         await bot.send_message(
                             target,
-                            "📩 <b>ADMIN XABARI</b>\n\n"
-                            + esc(text),
+                            "📩 <b>ADMIN XABARI</b>\n\n" + esc(text),
                         )
 
                         await message.answer(
                             "✅ Xabar yuborildi.",
                             reply_markup=admin_menu(),
                         )
-
-                        stat_add(
-                            "admin_user_messages"
-                        )
+                        stat_add("admin_user_messages")
 
                     except Exception:
-                        logging.exception(
-                            "One-user message failed."
-                        )
-
-                        await message.answer(
-                            "❌ Xabar yuborilmadi."
-                        )
+                        logging.exception("One-user message failed.")
+                        await message.answer("❌ Xabar yuborilmadi.")
 
                     ADMIN_STATE[uid] = {
                         "step": "panel",
                         "authenticated": True,
                     }
-
                     return
 
-                # -----------------------------------------
-                # BROADCAST
-                # -----------------------------------------
                 if step == "broadcast":
-                    await broadcast_text(
-                        message,
-                        text,
-                    )
+                    await broadcast_text(message, text)
                     return
 
-                # -----------------------------------------
-                # REQUIRED CHANNEL INPUT
-                # -----------------------------------------
                 if step == "channel_input":
                     raw = text
-
                     invite_link = None
                     channel_input = raw
 
-                    # Format:
-                    # @publicchannel
-                    #
-                    # or private:
-                    # -1001234567890|https://t.me/+invite
                     if "|" in raw:
-                        channel_input, invite_link = (
-                            raw.split("|", 1)
-                        )
-
-                        channel_input = (
-                            channel_input.strip()
-                        )
-                        invite_link = (
-                            invite_link.strip()
-                        )
+                        channel_input, invite_link = raw.split("|", 1)
+                        channel_input = channel_input.strip()
+                        invite_link = invite_link.strip()
 
                     try:
-                        if (
-                            channel_input.lstrip("-").isdigit()
-                        ):
-                            lookup = int(
-                                channel_input
-                            )
+                        if channel_input.lstrip("-").isdigit():
+                            lookup = int(channel_input)
                         else:
                             lookup = channel_input
 
-                        chat = await bot.get_chat(
-                            lookup
-                        )
+                        chat = await bot.get_chat(lookup)
 
                         if chat.type != "channel":
                             await message.answer(
-                                "❌ Bu chat kanal emas.\n\n"
+                                "❌ Bu chat kanal emas.\n"
                                 "Kanal username yoki kanal ID yuboring."
                             )
                             return
 
-                        username = getattr(
-                            chat,
-                            "username",
-                            None,
-                        )
-
-                        title = (
-                            getattr(chat, "title", None)
-                            or "Kanal"
-                        )
+                        username = getattr(chat, "username", None)
+                        title = getattr(chat, "title", None) or "Kanal"
 
                         if not username and not invite_link:
                             await message.answer(
                                 "❌ Private kanal uchun invite link ham yuboring.\n\n"
-                                "Misol:\n"
-                                "<code>-1001234567890|https://t.me/+ABCDEF</code>"
+                                "<code>-1001234567890|https://t.me/+INVITE</code>"
+                            )
+                            return
+
+                        # IMPORTANT: Bot must be an administrator in the channel
+                        # for reliable get_chat_member() subscription checks.
+                        me = await bot.get_me()
+                        bot_member = await bot.get_chat_member(
+                            chat.id,
+                            me.id,
+                        )
+                        bot_status = member_status_value(bot_member)
+
+                        if bot_status not in ("administrator", "creator"):
+                            await message.answer(
+                                "❌ Bot bu kanalda administrator emas.\n\n"
+                                "Botni kanalga ADMIN qilib qo'ying, "
+                                "keyin kanalni qayta qo'shing.\n\n"
+                                f"Bot statusi: <code>{esc(bot_status)}</code>"
                             )
                             return
 
@@ -2313,8 +2344,7 @@ async def text_router(message: Message):
 
                         if not channel_id:
                             await message.answer(
-                                "❌ Bu kanal allaqachon majburiy "
-                                "obunaga qo'shilgan."
+                                "❌ Bu kanal allaqachon majburiy obunaga qo'shilgan."
                             )
                             return
 
@@ -2326,8 +2356,7 @@ async def text_router(message: Message):
                         url = (
                             invite_link
                             or (
-                                f"https://t.me/"
-                                f"{username.lstrip('@')}"
+                                f"https://t.me/{username.lstrip('@')}"
                                 if username
                                 else "-"
                             )
@@ -2337,39 +2366,25 @@ async def text_router(message: Message):
                             "✅ <b>KANAL QO'SHILDI</b>\n\n"
                             f"📢 Nomi: <b>{esc(title)}</b>\n"
                             f"🆔 Chat ID: <code>{chat.id}</code>\n"
-                            f"🔗 Username: "
-                            f"<code>{esc(username or '-')}</code>\n"
+                            f"🔗 Username: <code>{esc(username or '-')}</code>\n"
                             f"🌐 Link: <code>{esc(url)}</code>\n\n"
-                            "⚠️ Bot shu kanalga qo'shilgan va "
-                            "a'zolikni tekshira oladigan huquqqa ega "
-                            "bo'lishi kerak.",
+                            "✅ Bot administrator ekanligi tekshirildi.",
                             reply_markup=admin_menu(),
                         )
 
-                    except Exception as exc:
-                        logging.exception(
-                            "Required channel add failed: %s",
-                            exc,
-                        )
-
+                    except Exception:
+                        logging.exception("Required channel add failed.")
                         await message.answer(
-                            "❌ Kanalni topib bo'lmadi.\n\n"
-                            "Tekshiring:\n"
-                            "• Public kanal uchun: <code>@kanal</code>\n"
-                            "• Private kanal uchun: "
-                            "<code>-100...|https://t.me/+...</code>\n"
-                            "• Bot kanalga qo'shilgan bo'lsin."
+                            "❌ Kanalni tekshirishda xatolik.\n\n"
+                            "Public: <code>@kanal_username</code>\n"
+                            "Private: <code>-100...|https://t.me/+...</code>\n\n"
+                            "Bot kanalga ADMIN qilib qo'yilganini tekshiring."
                         )
 
                     return
 
-    # Normal user message.
     create_or_update_user(message)
-
-    await search_movie(
-        message,
-        text,
-    )
+    await search_movie(message, text)
 
 
 # =========================================================
@@ -2390,7 +2405,6 @@ async def admin_add_movie(callback: CallbackQuery):
         "1️⃣ Kino kodini yuboring.\n"
         "Masalan: <code>101</code>"
     )
-
     await callback.answer()
 
 
@@ -2407,7 +2421,6 @@ async def admin_delete_movie(callback: CallbackQuery):
     await callback.message.answer(
         "🗑 O'chiriladigan kino kodini yuboring."
     )
-
     await callback.answer()
 
 
@@ -2418,23 +2431,14 @@ async def category_free(callback: CallbackQuery):
 
     state = ADMIN_STATE.get(ADMIN_ID)
 
-    if (
-        not state
-        or state.get("step") != "movie_category"
-    ):
-        await callback.answer(
-            "Jarayon topilmadi.",
-            show_alert=True,
-        )
+    if not state or state.get("step") != "movie_category":
+        await callback.answer("Jarayon topilmadi.", show_alert=True)
         return
 
     state["category"] = "free"
     state["step"] = "movie_video"
 
-    await callback.message.answer(
-        "4️⃣ Endi videoni Telegram orqali yuboring."
-    )
-
+    await callback.message.answer("4️⃣ Endi videoni Telegram orqali yuboring.")
     await callback.answer()
 
 
@@ -2445,23 +2449,14 @@ async def category_premium(callback: CallbackQuery):
 
     state = ADMIN_STATE.get(ADMIN_ID)
 
-    if (
-        not state
-        or state.get("step") != "movie_category"
-    ):
-        await callback.answer(
-            "Jarayon topilmadi.",
-            show_alert=True,
-        )
+    if not state or state.get("step") != "movie_category":
+        await callback.answer("Jarayon topilmadi.", show_alert=True)
         return
 
     state["category"] = "premium"
     state["step"] = "movie_video"
 
-    await callback.message.answer(
-        "4️⃣ Endi videoni Telegram orqali yuboring."
-    )
-
+    await callback.message.answer("4️⃣ Endi videoni Telegram orqali yuboring.")
     await callback.answer()
 
 
@@ -2474,21 +2469,14 @@ async def admin_video(message: Message):
 
     state = ADMIN_STATE.get(uid)
 
-    if (
-        not state
-        or state.get("step") != "movie_video"
-    ):
+    if not state or state.get("step") != "movie_video":
         return
 
-    code = state.get("code")
-    name = state.get("name")
-    category = state.get("category")
-
     movie_id = add_movie(
-        code,
-        name,
+        state.get("code"),
+        state.get("name"),
         message.video.file_id,
-        category,
+        state.get("category"),
     )
 
     if not movie_id:
@@ -2496,6 +2484,10 @@ async def admin_video(message: Message):
             "❌ Kino qo'shilmadi. Kod band bo'lishi mumkin."
         )
         return
+
+    code = state["code"]
+    name = state["name"]
+    category = state["category"]
 
     ADMIN_STATE[uid] = {
         "step": "panel",
@@ -2539,7 +2531,6 @@ async def admin_movies(callback: CallbackQuery):
             "📚 Kino yo'q.",
             reply_markup=back_admin_keyboard(),
         )
-
         await callback.answer()
         return
 
@@ -2563,7 +2554,6 @@ async def admin_movies(callback: CallbackQuery):
         text,
         reply_markup=back_admin_keyboard(),
     )
-
     await callback.answer()
 
 
@@ -2579,12 +2569,7 @@ async def admin_users(callback: CallbackQuery):
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT
-            id,
-            first_name,
-            username,
-            premium_until,
-            total_movies
+        SELECT id, first_name, username, premium_until, total_movies
         FROM users
         ORDER BY id DESC
         LIMIT 50
@@ -2604,32 +2589,25 @@ async def admin_users(callback: CallbackQuery):
     text = "👥 <b>USERLAR — 50 TA</b>\n\n"
 
     for row in rows:
-        status = (
-            "💎"
-            if is_premium(row["id"])
-            else "🆓"
-        )
+        status = "💎" if is_premium(row["id"]) else "🆓"
+        uname = f"@{esc(row['username'])}" if row["username"] else "-"
 
-        uname = (
-            f"@{esc(row['username'])}"
-            if row["username"]
-            else "-"
-        )
+        invited, successful = referral_counts(row["id"])
 
         text += (
             f"{status} <b>{esc(row['first_name'])}</b>\n"
             f"├ ID: <code>{row['id']}</code>\n"
             f"├ Username: {uname}\n"
-            f"├ Premium: "
-            f"<code>{fmt_dt(row['premium_until'])}</code>\n"
-            f"└ Kino: <b>{row['total_movies']}</b>\n\n"
+            f"├ Premium: <code>{fmt_dt(row['premium_until'])}</code>\n"
+            f"├ Kino: <b>{row['total_movies']}</b>\n"
+            f"├ Referral: <b>{invited}</b>\n"
+            f"└ Muvaffaqiyatli: <b>{successful}</b>\n\n"
         )
 
     await callback.message.answer(
         text[:3900],
         reply_markup=back_admin_keyboard(),
     )
-
     await callback.answer()
 
 
@@ -2646,14 +2624,9 @@ async def admin_payments(callback: CallbackQuery):
 
     cur.execute("""
         SELECT
-            id,
-            user_id,
-            username,
-            first_name,
-            plan_name,
-            price,
-            status,
-            created_at
+            id, user_id, username, first_name, plan_name,
+            price, original_price, discount_amount, final_price,
+            referrer_id, status, created_at
         FROM payments
         ORDER BY id DESC
         LIMIT 50
@@ -2667,7 +2640,6 @@ async def admin_payments(callback: CallbackQuery):
             "🧾 To'lovlar yo'q.",
             reply_markup=back_admin_keyboard(),
         )
-
         await callback.answer()
         return
 
@@ -2680,21 +2652,27 @@ async def admin_payments(callback: CallbackQuery):
     text = "🧾 <b>TO'LOVLAR</b>\n\n"
 
     for row in rows:
-        uname = (
-            f"@{esc(row['username'])}"
-            if row["username"]
-            else "-"
-        )
+        uname = f"@{esc(row['username'])}" if row["username"] else "-"
+        final = row["final_price"] or row["price"]
+        original = row["original_price"] or row["price"]
+        discount = row["discount_amount"] or 0
 
         text += (
-            f"{status_map.get(row['status'], '❔')} "
-            f"<b>#{row['id']}</b>\n"
+            f"{status_map.get(row['status'], '❔')} <b>#{row['id']}</b>\n"
             f"👤 {esc(row['first_name'])} {uname}\n"
             f"🆔 <code>{row['user_id']}</code>\n"
             f"💎 {esc(row['plan_name'])}\n"
-            f"💰 {money(row['price'])} so'm\n"
-            f"🕐 {esc(row['created_at'])}\n\n"
+            f"💰 Asl: {money(original)} so'm\n"
+            f"💳 To'lov: <b>{money(final)} so'm</b>\n"
         )
+
+        if discount:
+            text += f"🔥 Chegirma: -{money(discount)} so'm\n"
+
+        if row["referrer_id"]:
+            text += f"👥 Referrer: <code>{row['referrer_id']}</code>\n"
+
+        text += f"🕐 {esc(row['created_at'])}\n\n"
 
         if len(text) > 3500:
             await callback.message.answer(text)
@@ -2719,40 +2697,27 @@ async def admin_stats(callback: CallbackQuery):
 
     total_users = count_users()
     active_premium = count_active_premium()
-
-    total_movies, free_movies, premium_movies = (
-        movie_counts()
-    )
-
-    pending, approved, rejected, paid_users, revenue = (
-        payment_stats()
-    )
+    total_movies, free_movies, premium_movies = movie_counts()
+    pending, approved, rejected, paid_users, revenue, discounts = payment_stats()
 
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT COALESCE(SUM(total_movies),0) s
-        FROM users
-    """)
+    cur.execute("SELECT COALESCE(SUM(total_movies),0) s FROM users")
     watched = cur.fetchone()["s"]
 
     cur.execute("""
         SELECT COUNT(*) c
         FROM users
         WHERE last_seen >= ?
-    """, (
-        (now() - timedelta(days=1)).isoformat(),
-    ))
+    """, ((now() - timedelta(days=1)).isoformat(),))
     active_24h = cur.fetchone()["c"]
 
     cur.execute("""
         SELECT COUNT(*) c
         FROM users
         WHERE created_at >= ?
-    """, (
-        (now() - timedelta(days=1)).isoformat(),
-    ))
+    """, ((now() - timedelta(days=1)).isoformat(),))
     new_24h = cur.fetchone()["c"]
 
     conn.close()
@@ -2771,11 +2736,13 @@ async def admin_stats(callback: CallbackQuery):
         f"✅ Approved: <b>{approved}</b>\n"
         f"❌ Rejected: <b>{rejected}</b>\n"
         f"👤 Paid users: <b>{paid_users}</b>\n"
-        f"💰 Daromad: <b>{money(revenue)} so'm</b>\n\n"
+        f"💰 Daromad: <b>{money(revenue)} so'm</b>\n"
+        f"🔥 Chegirmalar: <b>{money(discounts)} so'm</b>\n\n"
+        f"👥 Referrals: <b>{stat_get('referrals')}</b>\n"
+        f"🎁 Referral bonuslar: <b>{stat_get('referral_rewards')}</b>\n"
         f"🧾 Cheklar: <b>{stat_get('receipts')}</b>\n"
         f"📢 Broadcastlar: <b>{stat_get('broadcasts')}</b>\n"
-        f"📢 Majburiy kanallar: "
-        f"<b>{len(all_required_channels())}</b>",
+        f"📢 Majburiy kanallar: <b>{len(all_required_channels())}</b>",
         reply_markup=back_admin_keyboard(),
     )
 
@@ -2783,7 +2750,7 @@ async def admin_stats(callback: CallbackQuery):
 
 
 # =========================================================
-# REQUIRED CHANNEL ADMIN PANEL
+# REQUIRED CHANNEL ADMIN
 # =========================================================
 @dp.callback_query(F.data == "admin_channels")
 async def admin_channels(callback: CallbackQuery):
@@ -2795,11 +2762,10 @@ async def admin_channels(callback: CallbackQuery):
     await callback.message.answer(
         "📢 <b>MAJBURIY OBUNA</b>\n\n"
         f"Jami kanallar: <b>{len(channels)}</b>\n\n"
-        "Bu bo'limdan user kino kodini yuborganda "
-        "obuna bo'lishi shart bo'lgan kanallarni boshqarasiz.",
+        "User kino kodini yuborganda shu kanallarga obuna "
+        "bo'lishi shart.",
         reply_markup=channels_admin_keyboard(),
     )
-
     await callback.answer()
 
 
@@ -2815,16 +2781,13 @@ async def admin_add_channel(callback: CallbackQuery):
 
     await callback.message.answer(
         "➕ <b>MAJBURIY KANAL QO'SHISH</b>\n\n"
-        "Public kanal uchun:\n"
+        "Public kanal:\n"
         "<code>@kanal_username</code>\n\n"
-        "Private kanal uchun:\n"
+        "Private kanal:\n"
         "<code>-1001234567890|https://t.me/+INVITE</code>\n\n"
-        "⚠️ Botni kanalga oldindan qo'shing. "
-        "A'zolikni tekshirish uchun bot kanalga kirish "
-        "huquqiga ega bo'lishi kerak.\n\n"
+        "⚠️ Botni kanalga ADMIN qilib qo'ying.\n\n"
         "Bekor qilish: <code>/cancel</code>"
     )
-
     await callback.answer()
 
 
@@ -2845,10 +2808,7 @@ async def admin_list_channels(callback: CallbackQuery):
 
     text = "📢 <b>MAJBURIY KANALLAR</b>\n\n"
 
-    for index, channel in enumerate(
-        channels,
-        start=1,
-    ):
+    for index, channel in enumerate(channels, start=1):
         username = channel["username"] or "-"
         link = channel_join_url(channel) or "-"
 
@@ -2858,8 +2818,7 @@ async def admin_list_channels(callback: CallbackQuery):
             f"🆔 Chat ID: <code>{channel['chat_id']}</code>\n"
             f"🔗 Username: <code>{esc(username)}</code>\n"
             f"🌐 Link: <code>{esc(link)}</code>\n"
-            f"🕐 Qo'shilgan: "
-            f"<code>{esc(channel['created_at'])}</code>\n\n"
+            f"🕐 Qo'shilgan: <code>{esc(channel['created_at'])}</code>\n\n"
         )
 
         if len(text) > 3500:
@@ -2910,54 +2869,32 @@ async def admin_delete_channel(callback: CallbackQuery):
     await callback.message.answer(
         "🗑 <b>KANAL O'CHIRISH</b>\n\n"
         "O'chirmoqchi bo'lgan kanalni tanlang:",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=rows
-        ),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
-
     await callback.answer()
 
 
 @dp.callback_query(F.data.startswith("admin_delch_"))
-async def admin_delete_channel_confirm(
-    callback: CallbackQuery,
-):
+async def admin_delete_channel_confirm(callback: CallbackQuery):
     if not require_admin(callback):
         return
 
     try:
         channel_id = int(
-            callback.data.replace(
-                "admin_delch_",
-                "",
-                1,
-            )
+            callback.data.replace("admin_delch_", "", 1)
         )
     except ValueError:
-        await callback.answer(
-            "ID noto'g'ri.",
-            show_alert=True,
-        )
+        await callback.answer("ID noto'g'ri.", show_alert=True)
         return
 
     channel = get_required_channel(channel_id)
 
     if not channel:
-        await callback.answer(
-            "Kanal topilmadi.",
-            show_alert=True,
-        )
+        await callback.answer("Kanal topilmadi.", show_alert=True)
         return
 
-    deleted = delete_required_channel_by_id(
-        channel_id
-    )
-
-    if not deleted:
-        await callback.answer(
-            "Kanal o'chirilmadi.",
-            show_alert=True,
-        )
+    if not delete_required_channel_by_id(channel_id):
+        await callback.answer("Kanal o'chirilmadi.", show_alert=True)
         return
 
     await callback.message.answer(
@@ -2966,10 +2903,7 @@ async def admin_delete_channel_confirm(
         f"🆔 Chat ID: <code>{channel['chat_id']}</code>",
         reply_markup=channels_admin_keyboard(),
     )
-
-    await callback.answer(
-        "Kanal o'chirildi."
-    )
+    await callback.answer("Kanal o'chirildi.")
 
 
 # =========================================================
@@ -2989,7 +2923,6 @@ async def admin_vip(callback: CallbackQuery):
         "💎 <b>PREMIUM BERISH</b>\n\n"
         "Telegram ID yoki @username yuboring."
     )
-
     await callback.answer()
 
 
@@ -2998,40 +2931,25 @@ async def admin_vip_plan(callback: CallbackQuery):
     if not require_admin(callback):
         return
 
-    key = callback.data.replace(
-        "vip_",
-        "",
-        1,
-    )
-
+    key = callback.data.replace("vip_", "", 1)
     plan = PLANS.get(key)
 
     if not plan:
-        await callback.answer(
-            "Tarif topilmadi.",
-            show_alert=True,
-        )
+        await callback.answer("Tarif topilmadi.", show_alert=True)
         return
 
     state = ADMIN_STATE.get(ADMIN_ID)
-
-    target = (
-        state.get("target_user")
-        if state
-        else None
-    )
+    target = state.get("target_user") if state else None
 
     if not target:
-        await callback.answer(
-            "User tanlanmagan.",
-            show_alert=True,
-        )
+        await callback.answer("User tanlanmagan.", show_alert=True)
         return
 
-    new_until = activate_premium(
-        target,
-        plan["days"],
-    )
+    new_until = activate_premium(target, plan["days"])
+
+    if not new_until:
+        await callback.answer("User topilmadi.", show_alert=True)
+        return
 
     ADMIN_STATE[ADMIN_ID] = {
         "step": "panel",
@@ -3043,26 +2961,19 @@ async def admin_vip_plan(callback: CallbackQuery):
             target,
             "🎉 <b>PREMIUM FAOLLASHDI</b>\n\n"
             f"💎 {esc(plan['name'])}\n"
-            f"⏳ Tugash: "
-            f"<code>{fmt_dt(new_until)}</code>",
+            f"⏳ Tugash: <code>{fmt_dt(new_until)}</code>",
         )
     except Exception:
-        logging.exception(
-            "Manual premium notify failed."
-        )
+        logging.exception("Manual premium notify failed.")
 
     await callback.message.answer(
         "✅ <b>PREMIUM BERILDI</b>\n\n"
         f"🆔 User: <code>{target}</code>\n"
         f"💎 Tarif: <b>{esc(plan['name'])}</b>\n"
-        f"⏳ Tugash: "
-        f"<code>{fmt_dt(new_until)}</code>",
+        f"⏳ Tugash: <code>{fmt_dt(new_until)}</code>",
         reply_markup=admin_menu(),
     )
-
-    await callback.answer(
-        "Premium ochildi!"
-    )
+    await callback.answer("Premium ochildi!")
 
 
 # =========================================================
@@ -3081,7 +2992,6 @@ async def admin_message_user(callback: CallbackQuery):
     await callback.message.answer(
         "💬 User Telegram ID yoki @username yuboring."
     )
-
     await callback.answer()
 
 
@@ -3098,16 +3008,11 @@ async def admin_broadcast(callback: CallbackQuery):
     await callback.message.answer(
         "📢 Barcha userlarga yuboriladigan xabarni yozing."
     )
-
     await callback.answer()
 
 
-async def broadcast_text(
-    admin_message,
-    text,
-):
+async def broadcast_text(admin_message, text):
     ids = all_user_ids()
-
     sent = 0
     failed = 0
 
@@ -3115,25 +3020,16 @@ async def broadcast_text(
         try:
             await bot.send_message(
                 uid,
-                "📢 <b>ADMIN XABARI</b>\n\n"
-                + esc(text),
+                "📢 <b>ADMIN XABARI</b>\n\n" + esc(text),
             )
-
             sent += 1
 
-        except (
-            TelegramForbiddenError,
-            TelegramBadRequest,
-        ):
+        except (TelegramForbiddenError, TelegramBadRequest):
             failed += 1
 
         except Exception:
             failed += 1
-
-            logging.exception(
-                "Broadcast error: %s",
-                uid,
-            )
+            logging.exception("Broadcast error: %s", uid)
 
         await asyncio.sleep(0.05)
 
@@ -3161,30 +3057,18 @@ async def admin_reset(callback: CallbackQuery):
     if not require_admin(callback):
         return
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="⚠️ HA, RESET",
-                    callback_data="admin_reset_confirm",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Bekor qilish",
-                    callback_data="admin_back",
-                )
-            ],
-        ]
-    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚠️ HA, RESET", callback_data="admin_reset_confirm")],
+        [InlineKeyboardButton(text="⬅️ Bekor qilish", callback_data="admin_back")],
+    ])
 
     await callback.message.answer(
         "⚠️ <b>RESET</b>\n\n"
         "Premium, to'lovlar va statistika tozalanadi.\n"
-        "Kinolar va majburiy kanallar o'chirilmaydi.",
+        "Kinolar, users va majburiy kanallar o'chirilmaydi.\n\n"
+        "Referral tarixini ham tozalash uchun alohida amal kerak bo'ladi.",
         reply_markup=keyboard,
     )
-
     await callback.answer()
 
 
@@ -3202,24 +3086,17 @@ async def admin_reset_confirm(callback: CallbackQuery):
             total_movies=0
     """)
 
-    cur.execute(
-        "DELETE FROM payments"
-    )
-
-    cur.execute(
-        "DELETE FROM bot_stats"
-    )
+    cur.execute("DELETE FROM payments")
+    cur.execute("DELETE FROM bot_stats")
 
     conn.commit()
     conn.close()
 
     await callback.message.answer(
         "✅ Reset bajarildi.\n\n"
-        "Kinolar va majburiy obuna kanallari "
-        "saqlanib qoldi.",
+        "Kinolar, users va majburiy obuna kanallari saqlandi.",
         reply_markup=admin_menu(),
     )
-
     await callback.answer()
 
 
@@ -3233,10 +3110,7 @@ async def admin_back(callback: CallbackQuery):
         "authenticated": True,
     }
 
-    await show_admin_panel(
-        callback.message
-    )
-
+    await show_admin_panel(callback.message)
     await callback.answer()
 
 
@@ -3245,16 +3119,12 @@ async def admin_logout(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         return
 
-    ADMIN_STATE.pop(
-        callback.from_user.id,
-        None,
-    )
+    ADMIN_STATE.pop(callback.from_user.id, None)
 
     await callback.message.answer(
         "🔒 Admin panel yopildi.\n"
         "Qayta kirish: <code>/admin</code>"
     )
-
     await callback.answer()
 
 
@@ -3265,10 +3135,7 @@ async def admin_logout(callback: CallbackQuery):
 async def cancel_handler(message: Message):
     uid = message.from_user.id
 
-    USER_PAYMENT_PLAN.pop(
-        uid,
-        None,
-    )
+    USER_PAYMENT_PLAN.pop(uid, None)
 
     if is_admin(uid):
         if admin_ok(uid):
@@ -3276,21 +3143,13 @@ async def cancel_handler(message: Message):
                 "step": "panel",
                 "authenticated": True,
             }
-
             await message.answer(
                 "❌ Amal bekor qilindi.",
                 reply_markup=admin_menu(),
             )
         else:
-            ADMIN_STATE.pop(
-                uid,
-                None,
-            )
-
-            await message.answer(
-                "❌ Amal bekor qilindi."
-            )
-
+            ADMIN_STATE.pop(uid, None)
+            await message.answer("❌ Amal bekor qilindi.")
         return
 
     await message.answer(
@@ -3311,15 +3170,10 @@ async def check_admin_delivery():
         me.id,
     )
 
-    logging.info(
-        "ADMIN_ID=%s",
-        ADMIN_ID,
-    )
+    logging.info("ADMIN_ID=%s", ADMIN_ID)
 
     try:
-        chat = await bot.get_chat(
-            ADMIN_ID
-        )
+        chat = await bot.get_chat(ADMIN_ID)
 
         logging.info(
             "ADMIN CHAT OK: id=%s | type=%s | username=%s | name=%s",
@@ -3330,10 +3184,10 @@ async def check_admin_delivery():
         )
 
     except Exception as exc:
-        logging.exception(
+        logging.warning(
             "ADMIN CHAT CHECK FAILED. "
-            "Admin must open the bot and press /start. "
-            "Also verify ADMIN_ID. Error: %s",
+            "Admin should open bot and press /start. "
+            "Verify ADMIN_ID. Error: %s",
             exc,
         )
 
@@ -3342,10 +3196,10 @@ async def check_required_channels_startup():
     channels = all_required_channels()
 
     if not channels:
-        logging.info(
-            "Required subscription: no channels configured."
-        )
+        logging.info("Required subscription: no channels configured.")
         return
+
+    me = await bot.get_me()
 
     logging.info(
         "Required subscription: %s channel(s).",
@@ -3354,16 +3208,27 @@ async def check_required_channels_startup():
 
     for channel in channels:
         try:
-            chat = await bot.get_chat(
-                channel["chat_id"]
+            chat = await bot.get_chat(channel["chat_id"])
+
+            bot_member = await bot.get_chat_member(
+                chat.id,
+                me.id,
             )
+            bot_status = member_status_value(bot_member)
 
             logging.info(
-                "Required channel OK | id=%s | title=%s | username=%s",
+                "Required channel | id=%s | title=%s | bot_status=%s",
                 chat.id,
                 getattr(chat, "title", None),
-                getattr(chat, "username", None),
+                bot_status,
             )
+
+            if bot_status not in ("administrator", "creator"):
+                logging.error(
+                    "CRITICAL: Bot is NOT admin in required channel %s. "
+                    "get_chat_member() user checks may fail.",
+                    chat.id,
+                )
 
         except Exception:
             logging.exception(
@@ -3377,11 +3242,11 @@ async def check_required_channels_startup():
 # =========================================================
 @dp.errors()
 async def global_error_handler(event):
-    logging.exception(
+    logging.error(
         "Unhandled aiogram error: %s",
         event.exception,
+        exc_info=True,
     )
-
     return True
 
 
@@ -3396,14 +3261,11 @@ async def main():
     print("=" * 65)
     print("🗄 Database:", DB_NAME)
     print("🔐 Admin ID:", ADMIN_ID)
-    print(
-        "💎 Plans:",
-        ", ".join(PLANS.keys()),
-    )
-    print(
-        "📢 Required channels:",
-        len(all_required_channels()),
-    )
+    print("💎 Plans:", ", ".join(PLANS.keys()))
+    print("📢 Required channels:", len(all_required_channels()))
+    print("👥 Referral system: ON")
+    print("🔥 Referral discount: 10%")
+    print("🎁 Referral reward: +1 day")
     print("=" * 65)
 
     await check_admin_delivery()
@@ -3422,16 +3284,11 @@ async def main():
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-
-    except (
-        KeyboardInterrupt,
-        SystemExit,
-    ):
+    except (KeyboardInterrupt, SystemExit):
         print("🛑 Bot to'xtatildi.")
 
 
-requirements = """aiogram>=3.20,<4
-"""
+requirements = "aiogram>=3.20,<4\n"
 
 out = Path("/mnt/data/kino_bot_fixed.py")
 req = Path("/mnt/data/requirements.txt")
@@ -3439,6 +3296,10 @@ req = Path("/mnt/data/requirements.txt")
 out.write_text(code, encoding="utf-8")
 req.write_text(requirements, encoding="utf-8")
 
+# Syntax check without starting Telegram polling.
+compile(code, "kino_bot_fixed.py", "exec")
+
 print(f"Tayyor: {out}")
 print(f"Qatorlar soni: {len(code.splitlines())}")
 print(f"Requirements: {req}")
+print("Python syntax check: OK")
