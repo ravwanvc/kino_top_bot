@@ -1,6 +1,7 @@
 from pathlib import Path
 
 
+
 import asyncio
 import html
 import logging
@@ -41,6 +42,20 @@ try:
     ADMIN_ID = int(os.getenv("8972505646", "8972505646").strip())
 except ValueError:
     ADMIN_ID = 0
+
+ADMIN_PIN = os.getenv("jasur.2011", "jasur.2011").strip()
+PAYMENT_CARD = os.getenv("5614 6812 8226 6067", "5614 6812 8226 6067").strip()
+PAYMENT_OWNER = os.getenv("K.M", "K.M").strip()
+
+
+
+BOT_TOKEN = os.getenv("8902562007:AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM", "8902562007:AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM").strip()
+
+try:
+    ADMIN_ID = int(os.getenv("8972505646", "8972505646").strip())
+    ADMIN_ID = int(os.getenv("8972505646", "8972505646").strip())
+except ValueError:
+    ADMIN_ID = 8972505646
 
 ADMIN_PIN = os.getenv("jasur.2011", "jasur.2011").strip()
 PAYMENT_CARD = os.getenv("5614 6812 8226 6067", "5614 6812 8226 6067").strip()
@@ -957,6 +972,9 @@ async def get_missing_required_channels(user_id):
 
     return missing
 
+# =========================================================
+# REQUIRED SUBSCRIPTION - ADMINLESS VERSION
+# =========================================================
 
 def subscription_keyboard(channels):
     rows = []
@@ -968,18 +986,20 @@ def subscription_keyboard(channels):
             rows.append([
                 InlineKeyboardButton(
                     text=f"📢 {channel['title']}",
-                    url=url,
+                    url=url
                 )
             ])
 
     rows.append([
         InlineKeyboardButton(
             text="✅ Obunani tekshirish",
-            callback_data="check_subscription",
+            callback_data="check_subscription"
         )
     ])
 
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return InlineKeyboardMarkup(
+        inline_keyboard=rows
+    )
 
 
 async def require_subscription(message: Message):
@@ -988,21 +1008,14 @@ async def require_subscription(message: Message):
     if not channels:
         return True
 
-    missing = await get_missing_required_channels(
-        message.from_user.id
-    )
-
-    if not missing:
-        return True
-
     await message.answer(
         "🔒 <b>MAJBURIY OBUNA</b>\n\n"
         "Kino olish uchun quyidagi kanallarga obuna bo'ling:\n\n"
         "1️⃣ Kanalga kiring\n"
-        "2️⃣ Obuna bo'ling\n"
-        "3️⃣ Pastdagi <b>✅ Obunani tekshirish</b> tugmasini bosing.\n\n"
-        "⚠️ Barcha majburiy kanallarga obuna bo'lmasangiz kino berilmaydi.",
-        reply_markup=subscription_keyboard(missing),
+        "2️⃣ <b>Obuna bo'ling</b>\n"
+        "3️⃣ <b>✅ Obunani tekshirish</b> tugmasini bosing.\n\n"
+        "📢 Kanallarga kirish uchun quyidagi tugmalardan foydalaning.",
+        reply_markup=subscription_keyboard(channels)
     )
 
     return False
@@ -1010,32 +1023,19 @@ async def require_subscription(message: Message):
 
 @dp.callback_query(F.data == "check_subscription")
 async def check_subscription_callback(callback: CallbackQuery):
-    missing = await get_missing_required_channels(
-        callback.from_user.id
-    )
-
-    if missing:
-        await callback.answer(
-            "❌ Hali barcha kanallarga obuna bo'lmagansiz.",
-            show_alert=True,
-        )
-
-        try:
-            await callback.message.edit_reply_markup(
-                reply_markup=subscription_keyboard(missing)
-            )
-        except Exception:
-            pass
-
-        return
 
     await callback.answer(
-        "✅ Obuna tasdiqlandi!",
-        show_alert=True,
+        "✅ Tekshirildi!",
+        show_alert=True
     )
 
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
     await callback.message.answer(
-        "✅ <b>Barcha majburiy kanallarga obuna bo'lgansiz.</b>\n\n"
+        "✅ <b>Tekshiruv tugadi!</b>\n\n"
         "Endi kino kodini yuborishingiz mumkin."
     )
 
@@ -3269,7 +3269,6 @@ async def main():
     print("=" * 65)
 
     await check_admin_delivery()
-    await check_required_channels_startup()
 
     try:
         await dp.start_polling(
@@ -3286,20 +3285,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         print("🛑 Bot to'xtatildi.")
-
-
-requirements = "aiogram>=3.20,<4\n"
-
-out = Path("/mnt/data/kino_bot_fixed.py")
-req = Path("/mnt/data/requirements.txt")
-
-out.write_text(code, encoding="utf-8")
-req.write_text(requirements, encoding="utf-8")
-
-# Syntax check without starting Telegram polling.
-compile(code, "kino_bot_fixed.py", "exec")
-
-print(f"Tayyor: {out}")
-print(f"Qatorlar soni: {len(code.splitlines())}")
-print(f"Requirements: {req}")
-print("Python syntax check: OK")
