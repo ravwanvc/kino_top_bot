@@ -35,31 +35,16 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 # The old bot token was exposed in the previous source.
 # Revoke it in @BotFather and create a NEW token.
 # =========================================================
-
-BOT_TOKEN = os.getenv("8902562007:AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM", "8902562007:AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM").strip()
-
-try:
-    ADMIN_ID = int(os.getenv("8972505646", "8972505646").strip())
-except ValueError:
-    ADMIN_ID = 0
-
-ADMIN_PIN = os.getenv("jasur.2011", "jasur.2011").strip()
-PAYMENT_CARD = os.getenv("5614 6812 8226 6067", "5614 6812 8226 6067").strip()
-PAYMENT_OWNER = os.getenv("K.M", "K.M").strip()
-
-
-
-BOT_TOKEN = os.getenv("8902562007:AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM", "8902562007:AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8902562007:AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM").strip()
 
 try:
-    ADMIN_ID = int(os.getenv("8972505646", "8972505646").strip())
-    ADMIN_ID = int(os.getenv("8972505646", "8972505646").strip())
+    ADMIN_ID = int(os.getenv("ADMIN_ID", "8972505646").strip())
 except ValueError:
     ADMIN_ID = 8972505646
 
-ADMIN_PIN = os.getenv("jasur.2011", "jasur.2011").strip()
-PAYMENT_CARD = os.getenv("5614 6812 8226 6067", "5614 6812 8226 6067").strip()
-PAYMENT_OWNER = os.getenv("K.M", "K.M").strip()
+ADMIN_PIN = os.getenv("ADMIN_PIN", "jasur.2011").strip()
+PAYMENT_CARD = os.getenv("PAYMENT_CARD", "5614 6812 8226 6067").strip()
+PAYMENT_OWNER = os.getenv("PAYMENT_OWNER", "K.M").strip()
 
 DB_NAME = os.getenv("DB_NAME", "kino_bot.db")
 TZ = ZoneInfo("Asia/Tashkent")
@@ -71,6 +56,8 @@ PLANS = {
     "30": {"name": "30 kunlik Premium", "days": 30, "price": 49000},
     "365": {"name": "1 yillik Premium", "days": 365, "price": 99000},
 }
+
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -962,15 +949,13 @@ async def is_user_subscribed(channel, user_id):
         )
         return False
 
-
 async def get_missing_required_channels(user_id):
-    missing = []
+    # Bot admin bo'la olmagani uchun bazadagi barcha majburiy kanallarni ro'yxat sifatida qaytaradi
+    return all_required_channels()
 
-    for channel in all_required_channels():
-        if not await is_user_subscribed(channel, user_id):
-            missing.append(channel)
 
-    return missing
+
+
 
 # =========================================================
 # REQUIRED SUBSCRIPTION - ADMINLESS VERSION
@@ -1346,18 +1331,20 @@ def back_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_back")]
     ])
-
+    
+    
+    
 def payment_admin_keyboard(payment_id):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
                 text="✅ TASDIQLASH",
-                callback_data=f"approve_{payment_id}",
+                callback_data=f"approve_{payment_id}"
             ),
             InlineKeyboardButton(
                 text="❌ RAD ETISH",
-                callback_data=f"reject_{payment_id}",
-            ),
+                callback_data=f"reject_{payment_id}"
+            )
         ]
     ])
 
@@ -2755,27 +2742,58 @@ async def admin_channels(callback: CallbackQuery):
     )
     await callback.answer()
 
+# Admin majburiy kanallar bo'limiga kirganda
+@dp.callback_query(F.data == "admin_channels")
+async def admin_channels_list(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Ruxsat yo'q!", show_alert=True)
+    
+    channels = all_required_channels()
+    text = "<b>📢 Majburiy kanallar ro'yxati:</b>\n\n"
+    
+    rows = []
+    for ch in channels:
+        text += f"ID: {ch['id']} | Title: {ch['title']} | Chat ID: {ch['chat_id']}\n"
+        rows.append([InlineKeyboardButton(text=f"❌ {ch['title']} o'chirish", callback_data=f"del_chan_{ch['id']}")])
+    
+    rows.append([InlineKeyboardButton(text="➕ Kanal qo'shish", callback_data="add_channel_start")])
+    rows.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin_back")])
+    
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
-@dp.callback_query(F.data == "admin_add_channel")
-async def admin_add_channel(callback: CallbackQuery):
-    if not require_admin(callback):
+# Kanal qo'shish tugmasi bosilganda
+@dp.callback_query(F.data == "add_channel_start")
+async def add_channel_start(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
         return
-
-    ADMIN_STATE[ADMIN_ID] = {
-        "step": "channel_input",
-        "authenticated": True,
-    }
-
+    
+    ADMIN_STATE[callback.from_user.id] = "waiting_channel_info"
     await callback.message.answer(
-        "➕ <b>MAJBURIY KANAL QO'SHISH</b>\n\n"
-        "Public kanal:\n"
-        "<code>@kanal_username</code>\n\n"
-        "Private kanal:\n"
-        "<code>-1001234567890|https://t.me/+INVITE</code>\n\n"
-        "⚠️ Botni kanalga ADMIN qilib qo'ying.\n\n"
-        "Bekor qilish: <code>/cancel</code>"
+        "Kanal ma'lumotlarini quyidagi formatda yuboring:\n\n"
+        "<code>CHAT_ID | KANAL NOMI | LINK</code>\n\n"
+        "Masalan:\n<code>-100123456789 | Mening Kanalim | https://t.me/mychannel</code>"
     )
     await callback.answer()
+
+# Admin kanal ma'lumotlarini matn sifatida yuborganda
+@dp.message(CommandStart()) # yoki oddiy matn handlerida ADMIN_STATE ni tekshirish:
+async def process_add_channel(message: Message):
+    user_id = message.from_user.id
+    if ADMIN_STATE.get(user_id) == "waiting_channel_info":
+        try:
+            parts = message.text.split("|")
+            chat_id = int(parts[0].strip())
+            title = parts[1].strip()
+            invite_link = parts[2].strip() if len(parts) > 2 else None
+
+            add_required_channel(chat_id=chat_id, username=None, title=title, invite_link=invite_link)
+            ADMIN_STATE[user_id] = None
+            await message.answer("✅ Kanal muvaffaqiyatli qo'shildi!")
+        except Exception as e:
+            await message.answer("❌ Noto'g'ri format. Qaytadan urinib ko'ring yoki formatga e'tibor bering.")
+            
+            
+            
 
 
 @dp.callback_query(F.data == "admin_list_channels")
