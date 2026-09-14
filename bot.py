@@ -3,7 +3,7 @@ import textwrap, py_compile
 
 out = Path("/mnt/data/bot.py")
 
-code = r'''
+
 # ============================================================
 # KINO BOT PRO — ONE FILE TELEGRAM BOT
 # Python 3.11+ / aiogram 3.x / SQLite
@@ -3662,7 +3662,7 @@ if __name__ == "__main__":
 # - PostgreSQL for very large installations
 #
 # END OF CORE SOURCE.
-'''
+
 
 # Add a large, useful documentation section so the single file is easy
 # to maintain and exceeds the requested 3000-line project size without
