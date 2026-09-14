@@ -41,13 +41,13 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 # eski kodda yoki chatda) ochiq yozilgan bo'lsa — ularni albatta
 # @BotFather orqali (token) va shu yerda (PIN) DARHOL almashtiring.
 # =========================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-ADMIN_PIN = os.getenv("ADMIN_PIN", "").strip()
-PAYMENT_CARD = os.getenv("PAYMENT_CARD", "").strip()
-PAYMENT_OWNER = os.getenv("PAYMENT_OWNER", "").strip()
+BOT_TOKEN = os.getenv("8902562007:AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM", "8902562007:AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM").strip()
+ADMIN_PIN = os.getenv("jasur.2011", "jasur.2011").strip()
+PAYMENT_CARD = os.getenv("5614 6812 8226 6067", "5614 6812 8226 6067").strip()
+PAYMENT_OWNER = os.getenv("K.M", "K.M").strip()
 
 try:
-    ADMIN_ID = int(os.getenv("ADMIN_ID", "0").strip())
+    ADMIN_ID = int(os.getenv("8972505646", "0").strip())
 except ValueError:
     ADMIN_ID = 0
 
