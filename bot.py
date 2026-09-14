@@ -1,7 +1,7 @@
 from pathlib import Path
 import textwrap, py_compile
 
-out = Path("/mnt/data/bot.py")
+out = Path("/bot.py")
 
 
 import asyncio
