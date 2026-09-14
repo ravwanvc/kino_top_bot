@@ -1,4 +1,4 @@
-.env
+.env.example
 kino_bot.db
 __pycache__/
 *.pyc
