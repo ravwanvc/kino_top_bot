@@ -1,108 +1,59 @@
-from pathlib import Path
-import textwrap, py_compile
-
-out = Path("/bot.py")
-
-
 import asyncio
 import html
 import logging
 import os
-import shutil
 import sqlite3
-import time
-import traceback
-from contextlib import closing
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode, ChatMemberStatus
-from aiogram.exceptions import (
-    TelegramBadRequest,
-    TelegramForbiddenError,
-    TelegramNetworkError,
-    TelegramRetryAfter,
-    TelegramServerError,
-)
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
-from aiogram.types import (
-    CallbackQuery,
-    FSInputFile,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-)
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
+# =========================================================
+# SOZLAMALAR (CONFIG)
+# =========================================================
+# MUHIM: Maxfiy ma'lumotlarni faqat environment variables dan o'qing!
+# Windows PowerShell:
+#   $env:BOT_TOKEN="YOUR_TOKEN"
+#   $env:ADMIN_ID="123456789"
+#   $env:ADMIN_PIN="YOUR_PIN"
+#   $env:PAYMENT_CARD="5614 6812 8226 6067"
+#   $env:PAYMENT_OWNER="K.M"
 
-# ============================================================
-# 1. CONFIGURATION
-# ============================================================
-
-APP_NAME = "KINO BOT PRO"
-TIMEZONE = ZoneInfo("Asia/Tashkent")
-
-BOT_TOKEN = os.getenv("AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM", "AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM").strip()
-ADMIN_ID_RAW = os.getenv("8972505646", "8972505646").strip()
-ADMIN_PIN = os.getenv("jasur.2011", "jasur.2011").strip()
-PAYMENT_CARD = os.getenv("P5614 6812 8226 6067", "5614 6812 8226 6067").strip()
-PAYMENT_OWNER = os.getenv("K.M", "K.M").strip()
-DB_NAME = os.getenv("DB_NAME", "kino_bot.db").strip() or "kino_bot.db"
-
-FREE_DAILY_LIMIT = 3
-REFERRAL_DISCOUNT_PERCENT = 10
-REFERRAL_BONUS_DAYS = 1
-
-PLANS = {
-    "1": {"days": 1, "price": 3000, "label": "1 kun"},
-    "7": {"days": 7, "price": 15000, "label": "7 kun"},
-    "10": {"days": 10, "price": 20000, "label": "10 kun"},
-    "30": {"days": 30, "price": 49000, "label": "30 kun"},
-    "365": {"days": 365, "price": 99000, "label": "1 yil"},
-}
-
-PAGE_SIZE = 8
-BROADCAST_DELAY = 0.07
-MAX_BROADCAST_RETRIES = 3
-
-if not BOT_TOKEN:
-    raise RuntimeError(
-        "BOT_TOKEN noto'g'ri yoki bo'sh. "
-        "Railway/Render Environment Variables ichida BOT_TOKEN ni kiriting."
-    )
+BOT_TOKEN = os.getenv("8902562007:AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM", "8902562007:AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM").strip()
 
 try:
-    ADMIN_ID = int(ADMIN_ID_RAW)
-except (TypeError, ValueError):
-    raise RuntimeError(
-        "ADMIN_ID noto'g'ri yoki bo'sh. "
-        "Environment Variables ichida ADMIN_ID ni Telegram ID raqamingizga qo'ying."
-    )
+    ADMIN_ID = int(os.getenv("8972505646", "8972505646").strip())
+except ValueError:
+    ADMIN_ID = 8972505646
 
-DB_PATH = Path(DB_NAME).resolve()
-BACKUP_DIR = DB_PATH.parent / "backups"
-BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+ADMIN_PIN = os.getenv("jasur.2011", "jasur.2011").strip()
+PAYMENT_CARD = os.getenv("5614 6812 8226 6067", "5614 6812 8226 6067").strip()
+PAYMENT_OWNER = os.getenv("K.M", "K.M").strip()
 
+DB_NAME = os.getenv("DB_NAME", "kino_bot.db")
+TZ = ZoneInfo("Asia/Tashkent")
 
-# ============================================================
-# 2. LOGGING
-# ============================================================
+# Tariflar
+PLANS = {
+    "1": {"name": "1 kunlik Premium", "days": 1, "price": 3000},
+    "7": {"name": "7 kunlik Premium", "days": 7, "price": 15000},
+    "10": {"name": "10 kunlik Premium", "days": 10, "price": 20000},
+    "30": {"name": "30 kunlik Premium", "days": 30, "price": 49000},
+    "365": {"name": "1 yillik Premium", "days": 365, "price": 99000},
+}
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    format="%(asctime)s | %(levelname)s | %(message)s",
 )
-logger = logging.getLogger("kino_bot")
 
-
-# ============================================================
-# 3. BOT OBJECTS
-# ============================================================
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN sozlanmagan!")
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -110,3572 +61,2091 @@ bot = Bot(
 )
 dp = Dispatcher()
 
+# Vaqtinchalik holatlar
+ADMIN_STATE = {}
+USER_PAYMENT_PLAN = {}
+BOT_USERNAME = None
 
-# ============================================================
-# 4. RUNTIME STATE
-# ============================================================
-
-# Runtime-only state is kept here only for UI convenience.
-# Important business data always lives in SQLite.
-ADMIN_RUNTIME = {
-    "authenticated": False,
-    "last_action": {},
-}
-
-BROADCAST_RUNNING = False
-
-
-# ============================================================
-# 5. UTILITY FUNCTIONS
-# ============================================================
-
-def now_local() -> datetime:
-    return datetime.now(TIMEZONE)
-
-
-def now_iso() -> str:
-    return now_local().isoformat(timespec="seconds")
-
-
-def today_key() -> str:
-    return now_local().date().isoformat()
-
-
-def escape(value) -> str:
-    return html.escape(str(value or ""))
-
-
-def format_money(value: int) -> str:
-    return f"{int(value):,}".replace(",", " ")
-
-
-def format_date(value: Optional[str]) -> str:
-    if not value:
-        return "—"
-    try:
-        dt = datetime.fromisoformat(value)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=TIMEZONE)
-        return dt.astimezone(TIMEZONE).strftime("%d.%m.%Y %H:%M")
-    except Exception:
-        return str(value)
-
-
-def premium_active(premium_until: Optional[str]) -> bool:
-    if not premium_until:
-        return False
-    try:
-        dt = datetime.fromisoformat(premium_until)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=TIMEZONE)
-        return dt > now_local()
-    except Exception:
-        return False
-
-
-def parse_datetime(value: Optional[str]) -> Optional[datetime]:
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(value)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=TIMEZONE)
-        return dt.astimezone(TIMEZONE)
-    except Exception:
-        return None
-
-
-def calculate_final_price(original_price: int, has_referral: bool) -> tuple[int, int]:
-    if not has_referral:
-        return original_price, 0
-    discount = (original_price * REFERRAL_DISCOUNT_PERCENT + 50) // 100
-    return original_price - discount, discount
-
-
-def safe_int(value, default=0) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def user_display(user) -> str:
-    username = getattr(user, "username", None)
-    first_name = getattr(user, "first_name", None)
-    if username:
-        return f"@{escape(username)}"
-    if first_name:
-        return escape(first_name)
-    return f"ID {getattr(user, 'id', '')}"
-
-
-async def safe_answer_callback(callback: CallbackQuery, text: Optional[str] = None):
-    try:
-        await callback.answer(text or "")
-    except Exception:
-        pass
-
-
-async def safe_delete(message: Message):
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
-
-async def safe_edit(message: Message, text: str, reply_markup=None):
-    try:
-        return await message.edit_text(text, reply_markup=reply_markup)
-    except TelegramBadRequest:
-        try:
-            return await message.answer(text, reply_markup=reply_markup)
-        except Exception:
-            return None
-    except Exception:
-        return None
-
-
-async def safe_send_message(user_id: int, text: str, **kwargs):
-    for attempt in range(MAX_BROADCAST_RETRIES):
-        try:
-            return await bot.send_message(user_id, text, **kwargs)
-        except TelegramRetryAfter as e:
-            await asyncio.sleep(float(e.retry_after) + 0.5)
-        except (TelegramNetworkError, TelegramServerError):
-            await asyncio.sleep(1.5 * (attempt + 1))
-        except TelegramForbiddenError:
-            raise
-        except TelegramBadRequest:
-            raise
-    raise RuntimeError("Telegram request failed after retries")
-
-
-def is_admin(user_id: int) -> bool:
-    return int(user_id) == ADMIN_ID
-
-
-# ============================================================
-# 6. DATABASE LAYER
-# ============================================================
-
-def connect_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+# =========================================================
+# MA'LUMOTLAR BAZASI (DATABASE)
+# =========================================================
+def db():
+    conn = sqlite3.connect(DB_NAME, timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
-    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
-
-def db_execute(sql: str, params=(), commit=True):
-    with closing(connect_db()) as conn:
-        cur = conn.execute(sql, params)
-        if commit:
-            conn.commit()
-        return cur
-
-
-def db_fetchone(sql: str, params=()):
-    with closing(connect_db()) as conn:
-        return conn.execute(sql, params).fetchone()
-
-
-def db_fetchall(sql: str, params=()):
-    with closing(connect_db()) as conn:
-        return conn.execute(sql, params).fetchall()
-
-
-def db_scalar(sql: str, params=(), default=0):
-    row = db_fetchone(sql, params)
-    if row is None:
-        return default
-    value = row[0]
-    return default if value is None else value
-
+def ensure_column(table, column, definition):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    columns = {row["name"] for row in cur.fetchall()}
+    if column not in columns:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        conn.commit()
+    conn.close()
 
 def init_db():
-    with closing(connect_db()) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                joined_at TEXT NOT NULL,
-                premium_until TEXT,
-                daily_count INTEGER NOT NULL DEFAULT 0,
-                daily_date TEXT,
-                referral_from INTEGER,
-                referral_completed INTEGER NOT NULL DEFAULT 0,
-                is_blocked INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE IF NOT EXISTS movies (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                code TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-                category TEXT NOT NULL DEFAULT 'free',
-                file_id TEXT NOT NULL,
-                file_type TEXT NOT NULL DEFAULT 'video',
-                description TEXT,
-                created_at TEXT NOT NULL,
-                views INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE IF NOT EXISTS payments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                plan_key TEXT NOT NULL,
-                days INTEGER NOT NULL,
-                original_price INTEGER NOT NULL,
-                discount INTEGER NOT NULL DEFAULT 0,
-                final_price INTEGER NOT NULL,
-                referrer_id INTEGER,
-                has_referral INTEGER NOT NULL DEFAULT 0,
-                receipt_file_id TEXT,
-                receipt_type TEXT,
-                status TEXT NOT NULL DEFAULT 'PENDING',
-                created_at TEXT NOT NULL,
-                approved_at TEXT,
-                rejected_at TEXT,
-                approved_by INTEGER,
-                FOREIGN KEY(user_id) REFERENCES users(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS referrals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                referrer_id INTEGER NOT NULL,
-                invited_id INTEGER NOT NULL UNIQUE,
-                created_at TEXT NOT NULL,
-                completed_at TEXT,
-                reward_given INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE IF NOT EXISTS required_channels (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id TEXT NOT NULL UNIQUE,
-                title TEXT NOT NULL,
-                invite_link TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS bot_stats (
-                key TEXT PRIMARY KEY,
-                value INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE IF NOT EXISTS admin_states (
-                user_id INTEGER PRIMARY KEY,
-                state TEXT,
-                data TEXT,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_movies_code ON movies(code);
-            CREATE INDEX IF NOT EXISTS idx_movies_name ON movies(name);
-            CREATE INDEX IF NOT EXISTS idx_movies_category ON movies(category);
-            CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
-            CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id);
-            CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
-            CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at);
-            CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id);
-            """
+    conn = db()
+    cur = conn.cursor()
+    
+    # Users jadvali
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            first_name TEXT,
+            username TEXT,
+            premium_until TEXT,
+            created_at TEXT NOT NULL,
+            total_movies INTEGER DEFAULT 0,
+            last_seen TEXT
         )
+    """)
+    
+    # Movies jadvali
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS movies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            file_id TEXT NOT NULL,
+            category TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    
+    # Payments jadvali
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            first_name TEXT,
+            plan_key TEXT NOT NULL,
+            plan_name TEXT NOT NULL,
+            price INTEGER NOT NULL,
+            original_price INTEGER,
+            discount_amount INTEGER DEFAULT 0,
+            final_price INTEGER,
+            referral_discount INTEGER DEFAULT 0,
+            referrer_id INTEGER,
+            receipt_file_id TEXT NOT NULL,
+            receipt_type TEXT DEFAULT 'photo',
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            approved_at TEXT
+        )
+    """)
+    
+    # Stats jadvali
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS bot_stats (
+            key TEXT PRIMARY KEY,
+            value INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    
+    # Required channels jadvali
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS required_channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL UNIQUE,
+            username TEXT,
+            title TEXT NOT NULL,
+            invite_link TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    
+    # Referrals jadvali
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS referrals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            referrer_id INTEGER NOT NULL,
+            referred_id INTEGER NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'pending',
+            payment_id INTEGER,
+            created_at TEXT NOT NULL,
+            rewarded_at TEXT
+        )
+    """)
+    
+    conn.commit()
+    conn.close()
+    
+    # Yangi ustunlarni qo'shish (migratsiya)
+    ensure_column("payments", "approved_at", "TEXT")
+    ensure_column("payments", "original_price", "INTEGER")
+    ensure_column("payments", "discount_amount", "INTEGER DEFAULT 0")
+    ensure_column("payments", "final_price", "INTEGER")
+    ensure_column("payments", "referral_discount", "INTEGER DEFAULT 0")
+    ensure_column("payments", "referrer_id", "INTEGER")
+    
+    # Eski to'lovlarni yangilash
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("UPDATE payments SET original_price = price WHERE original_price IS NULL")
+    cur.execute("UPDATE payments SET final_price = price WHERE final_price IS NULL")
+    cur.execute("UPDATE payments SET discount_amount = 0 WHERE discount_amount IS NULL")
+    cur.execute("UPDATE payments SET referral_discount = 0 WHERE referral_discount IS NULL")
+    conn.commit()
+    conn.close()
 
-        # Backward-compatible migrations.
-        existing = {
-            row["name"]
-            for row in conn.execute("PRAGMA table_info(users)").fetchall()
-        }
-        migrations = {
-            "users": [
-                ("referral_from", "INTEGER"),
-                ("referral_completed", "INTEGER NOT NULL DEFAULT 0"),
-                ("is_blocked", "INTEGER NOT NULL DEFAULT 0"),
-            ],
-            "movies": [
-                ("file_type", "TEXT NOT NULL DEFAULT 'video'"),
-                ("description", "TEXT"),
-                ("views", "INTEGER NOT NULL DEFAULT 0"),
-            ],
-            "payments": [
-                ("discount", "INTEGER NOT NULL DEFAULT 0"),
-                ("final_price", "INTEGER NOT NULL DEFAULT 0"),
-                ("referrer_id", "INTEGER"),
-                ("has_referral", "INTEGER NOT NULL DEFAULT 0"),
-                ("receipt_type", "TEXT"),
-                ("approved_at", "TEXT"),
-                ("rejected_at", "TEXT"),
-                ("approved_by", "INTEGER"),
-            ],
-        }
+# =========================================================
+# YORDAMCHI FUNKSIYALAR
+# =========================================================
+def now():
+    return datetime.now(TZ)
 
-        for table, columns in migrations.items():
-            current = {
-                row["name"]
-                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
-            }
-            for name, definition in columns:
-                if name not in current:
-                    conn.execute(
-                        f"ALTER TABLE {table} ADD COLUMN {name} {definition}"
-                    )
+def now_text():
+    return now().strftime("%Y-%m-%d %H:%M:%S")
 
-        conn.commit()
+def parse_dt(value):
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=TZ)
+        return dt
+    except Exception:
+        return None
 
+def fmt_dt(value):
+    dt = parse_dt(value) if isinstance(value, str) else value
+    if not dt:
+        return "-"
+    return dt.astimezone(TZ).strftime("%d.%m.%Y %H:%M")
 
-def ensure_user(tg_user, referral_from: Optional[int] = None) -> bool:
-    existing = db_fetchone("SELECT id FROM users WHERE id=?", (tg_user.id,))
+def esc(value):
+    return html.escape(str(value or ""))
+
+def money(value):
+    return f"{int(value):,}".replace(",", " ")
+
+def normalize_code(value):
+    return str(value or "").strip().upper()
+
+def username_text(user):
+    if user.username:
+        return f"@{esc(user.username)}"
+    return "Username yo'q"
+
+# =========================================================
+# STATISTIKA
+# =========================================================
+def stat_add(key, amount=1):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO bot_stats(key, value)
+        VALUES(?, ?)
+        ON CONFLICT(key)
+        DO UPDATE SET value = value + excluded.value
+    """, (key, amount))
+    conn.commit()
+    conn.close()
+
+def stat_get(key):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM bot_stats WHERE key=?", (key,))
+    row = cur.fetchone()
+    conn.close()
+    return int(row["value"]) if row else 0
+
+# =========================================================
+# USERS
+# =========================================================
+def get_user(user_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE id=?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+def create_or_update_user(message: Message):
+    user = message.from_user
+    existing = get_user(user.id)
+    conn = db()
+    cur = conn.cursor()
+    
     if existing:
-        db_execute(
-            """
+        cur.execute("""
             UPDATE users
-            SET username=?, first_name=?
+            SET first_name=?, username=?, last_seen=?
             WHERE id=?
-            """,
-            (tg_user.username, tg_user.first_name, tg_user.id),
-        )
+        """, (user.first_name or "User", user.username, now_text(), user.id))
+        conn.commit()
+        conn.close()
         return False
-
-    valid_ref = None
-    if referral_from and referral_from != tg_user.id:
-        ref_user = db_fetchone("SELECT id FROM users WHERE id=?", (referral_from,))
-        if ref_user:
-            valid_ref = referral_from
-
-    db_execute(
-        """
-        INSERT INTO users
-        (id, username, first_name, joined_at, referral_from)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
-            tg_user.id,
-            tg_user.username,
-            tg_user.first_name,
-            now_iso(),
-            valid_ref,
-        ),
-    )
-
-    if valid_ref:
-        try:
-            db_execute(
-                """
-                INSERT OR IGNORE INTO referrals
-                (referrer_id, invited_id, created_at)
-                VALUES (?, ?, ?)
-                """,
-                (valid_ref, tg_user.id, now_iso()),
-            )
-        except sqlite3.Error:
-            logger.exception("Referral creation failed")
-
+    
+    cur.execute("""
+        INSERT INTO users(id, first_name, username, premium_until, created_at, total_movies, last_seen)
+        VALUES(?, ?, ?, NULL, ?, 0, ?)
+    """, (user.id, user.first_name or "User", user.username, now_text(), now_text()))
+    conn.commit()
+    conn.close()
+    stat_add("new_users")
     return True
 
+def all_user_ids():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM users ORDER BY id")
+    rows = cur.fetchall()
+    conn.close()
+    return [int(row["id"]) for row in rows]
 
-def get_user(user_id: int):
-    return db_fetchone("SELECT * FROM users WHERE id=?", (user_id,))
+def find_user(value):
+    value = str(value or "").strip()
+    if not value:
+        return None
+    if value.isdigit():
+        user = get_user(int(value))
+        return int(value) if user else None
+    username = value.replace("@", "").strip().lower()
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM users WHERE LOWER(COALESCE(username,''))=?", (username,))
+    row = cur.fetchone()
+    conn.close()
+    return int(row["id"]) if row else None
 
+def count_users():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) c FROM users")
+    result = cur.fetchone()["c"]
+    conn.close()
+    return result
 
-def get_movie_by_code(code: str):
-    return db_fetchone(
-        "SELECT * FROM movies WHERE code=? COLLATE NOCASE",
-        (code.strip(),),
-    )
+def count_active_premium():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT COUNT(*) c FROM users
+        WHERE premium_until IS NOT NULL AND premium_until > ?
+    """, (now().isoformat(),))
+    result = cur.fetchone()["c"]
+    conn.close()
+    return result
 
+# =========================================================
+# REFERRALS
+# =========================================================
+def parse_referral_arg(message: Message):
+    text = (message.text or "").strip()
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+    arg = parts[1].strip()
+    if not arg.startswith("ref_"):
+        return None
+    raw_id = arg[4:]
+    if not raw_id.isdigit():
+        return None
+    return int(raw_id)
 
-def get_movie_by_id(movie_id: int):
-    return db_fetchone("SELECT * FROM movies WHERE id=?", (movie_id,))
-
-
-def update_daily_limit(user_id: int) -> tuple[int, bool]:
-    user = get_user(user_id)
-    if not user:
-        return 0, False
-
-    today = today_key()
-    if user["daily_date"] != today:
-        db_execute(
-            "UPDATE users SET daily_date=?, daily_count=0 WHERE id=?",
-            (today, user_id),
-        )
-        return 0, True
-
-    return int(user["daily_count"] or 0), False
-
-
-def consume_free_movie(user_id: int) -> bool:
-    count, _ = update_daily_limit(user_id)
-    if count >= FREE_DAILY_LIMIT:
+def create_referral(referrer_id, referred_id):
+    if referrer_id == referred_id:
+        return False
+    if not get_user(referrer_id):
+        return False
+    if not get_user(referred_id):
+        return False
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM referrals WHERE referred_id=?", (referred_id,))
+    if cur.fetchone():
+        conn.close()
+        return False
+    try:
+        cur.execute("""
+            INSERT INTO referrals(referrer_id, referred_id, status, created_at)
+            VALUES(?,?, 'pending', ?)
+        """, (referrer_id, referred_id, now_text()))
+        conn.commit()
+        conn.close()
+        stat_add("referrals")
+        return True
+    except sqlite3.IntegrityError:
+        conn.close()
         return False
 
-    db_execute(
-        "UPDATE users SET daily_count=daily_count+1, daily_date=? WHERE id=?",
-        (today_key(), user_id),
-    )
-    return True
+def get_active_referral_for_user(referred_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT * FROM referrals
+        WHERE referred_id=? AND status='pending'
+        LIMIT 1
+    """, (referred_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
 
+def referral_counts(referrer_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) c FROM referrals WHERE referrer_id=?", (referrer_id,))
+    total = cur.fetchone()["c"]
+    cur.execute("SELECT COUNT(*) c FROM referrals WHERE referrer_id=? AND status='completed'", (referrer_id,))
+    successful = cur.fetchone()["c"]
+    conn.close()
+    return total, successful
 
-def get_referral_for_user(user_id: int):
-    return db_fetchone(
-        """
-        SELECT r.*, u.username, u.first_name
-        FROM referrals r
-        LEFT JOIN users u ON u.id=r.referrer_id
-        WHERE r.invited_id=?
-        """,
-        (user_id,),
-    )
-
-
-def referral_has_been_completed(user_id: int) -> bool:
-    row = db_fetchone(
-        "SELECT referral_completed FROM users WHERE id=?",
-        (user_id,),
-    )
-    return bool(row and row["referral_completed"])
-
-
-def active_referral_discount_available(user_id: int) -> bool:
-    referral = get_referral_for_user(user_id)
+def complete_referral(referred_id, payment_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT * FROM referrals
+        WHERE referred_id=? AND status='pending'
+        LIMIT 1
+    """, (referred_id,))
+    referral = cur.fetchone()
     if not referral:
-        return False
-    return not bool(referral["completed_at"])
+        conn.close()
+        return None
+    cur.execute("""
+        UPDATE referrals
+        SET status='completed', payment_id=?, rewarded_at=?
+        WHERE id=? AND status='pending'
+    """, (payment_id, now_text(), referral["id"]))
+    changed = cur.rowcount
+    conn.commit()
+    conn.close()
+    return referral if changed == 1 else None
 
+def referral_price(user_id, plan_key):
+    plan = PLANS.get(plan_key)
+    if not plan:
+        return None, 0, None
+    referral = get_active_referral_for_user(user_id)
+    if not referral:
+        return plan["price"], 0, None
+    original = plan["price"]
+    final = (original * 90 + 50) // 100
+    discount = original - final
+    return final, discount, referral["referrer_id"]
 
-def active_premium_until(user_id: int) -> Optional[datetime]:
+async def get_bot_username():
+    global BOT_USERNAME
+    if BOT_USERNAME:
+        return BOT_USERNAME
+    me = await bot.get_me()
+    BOT_USERNAME = me.username
+    return BOT_USERNAME
+
+async def referral_link(user_id):
+    username = await get_bot_username()
+    if not username:
+        return None
+    return f"https://t.me/{username}?start=ref_{user_id}"
+
+# =========================================================
+# PREMIUM
+# =========================================================
+def premium_until(user_id):
+    user = get_user(user_id)
+    return user["premium_until"] if user else None
+
+def is_premium(user_id):
+    dt = parse_dt(premium_until(user_id))
+    return bool(dt and dt > now())
+
+def premium_days_left(user_id):
+    dt = parse_dt(premium_until(user_id))
+    if not dt or dt <= now():
+        return 0
+    seconds = (dt - now()).total_seconds()
+    return max(1, int((seconds + 86399) // 86400))
+
+def activate_premium(user_id, days):
     user = get_user(user_id)
     if not user:
         return None
-    dt = parse_datetime(user["premium_until"])
-    if dt and dt > now_local():
-        return dt
-    return None
-
-
-def extend_premium(user_id: int, days: int):
-    current = active_premium_until(user_id)
-    base = current if current else now_local()
+    current = now()
+    old = parse_dt(user["premium_until"])
+    base = old if old and old > current else current
     new_until = base + timedelta(days=days)
-    db_execute(
-        "UPDATE users SET premium_until=? WHERE id=?",
-        (new_until.isoformat(timespec="seconds"), user_id),
-    )
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE users
+        SET premium_until=?, last_seen=?
+        WHERE id=?
+    """, (new_until.isoformat(), now_text(), user_id))
+    conn.commit()
+    conn.close()
     return new_until
 
+# =========================================================
+# MOVIES
+# =========================================================
+def movie_exists(code):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM movies WHERE code=?", (normalize_code(code),))
+    row = cur.fetchone()
+    conn.close()
+    return row is not None
 
-def set_premium_until(user_id: int, dt: datetime):
-    db_execute(
-        "UPDATE users SET premium_until=? WHERE id=?",
-        (dt.astimezone(TIMEZONE).isoformat(timespec="seconds"), user_id),
-    )
+def get_movie(code):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM movies WHERE code=?", (normalize_code(code),))
+    row = cur.fetchone()
+    conn.close()
+    return row
 
-
-# ============================================================
-# 7. KEYBOARDS — PREMIUM STYLE
-# ============================================================
-
-def kb_main():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🎬 Kino izlash", callback_data="user_search"),
-                InlineKeyboardButton(text="👑 Premium", callback_data="user_premium"),
-            ],
-            [
-                InlineKeyboardButton(text="🔗 Referral", callback_data="user_referral"),
-                InlineKeyboardButton(text="👤 Profil", callback_data="user_profile"),
-            ],
-            [
-                InlineKeyboardButton(text="❓ Yordam", callback_data="user_help"),
-            ],
-        ]
-    )
-
-
-def kb_premium():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="👑 1 kun • 3 000 so'm", callback_data="plan_1"),
-            ],
-            [
-                InlineKeyboardButton(text="💎 7 kun • 15 000 so'm", callback_data="plan_7"),
-            ],
-            [
-                InlineKeyboardButton(text="💎 10 kun • 20 000 so'm", callback_data="plan_10"),
-            ],
-            [
-                InlineKeyboardButton(text="🏆 30 kun • 49 000 so'm", callback_data="plan_30"),
-            ],
-            [
-                InlineKeyboardButton(text="👑 1 yil • 99 000 so'm", callback_data="plan_365"),
-            ],
-            [
-                InlineKeyboardButton(text="⬅️ Orqaga", callback_data="home"),
-            ],
-        ]
-    )
-
-
-def kb_payment(payment_id: int):
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📸 Chek yuborish",
-                    callback_data=f"payment_receipt:{payment_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(text="⬅️ Orqaga", callback_data="user_premium"),
-            ],
-        ]
-    )
-
-
-def kb_back(target="home"):
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Orqaga", callback_data=target)]
-        ]
-    )
-
-
-def kb_admin():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🎬 Kinolar", callback_data="adm_movies"),
-                InlineKeyboardButton(text="👥 Userlar", callback_data="adm_users"),
-            ],
-            [
-                InlineKeyboardButton(text="👑 Premium", callback_data="adm_premium"),
-                InlineKeyboardButton(text="💳 To'lovlar", callback_data="adm_payments"),
-            ],
-            [
-                InlineKeyboardButton(text="🔗 Referral", callback_data="adm_referral"),
-                InlineKeyboardButton(text="📢 Kanallar", callback_data="adm_channels"),
-            ],
-            [
-                InlineKeyboardButton(text="📣 Broadcast", callback_data="adm_broadcast"),
-                InlineKeyboardButton(text="📊 Statistika", callback_data="adm_stats"),
-            ],
-            [
-                InlineKeyboardButton(text="🛠 Sozlamalar", callback_data="adm_settings"),
-                InlineKeyboardButton(text="💾 Backup", callback_data="adm_backup"),
-            ],
-        ]
-    )
-
-
-def kb_admin_movies():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="➕ Kino qo'shish", callback_data="movie_add"),
-                InlineKeyboardButton(text="🗑 O'chirish", callback_data="movie_delete"),
-            ],
-            [
-                InlineKeyboardButton(text="🔎 Qidirish", callback_data="movie_search_admin"),
-                InlineKeyboardButton(text="📋 Ro'yxat", callback_data="movie_list:0"),
-            ],
-            [InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_home")],
-        ]
-    )
-
-
-def kb_admin_users():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🔎 User topish", callback_data="user_find"),
-                InlineKeyboardButton(text="📋 Userlar", callback_data="user_list:0"),
-            ],
-            [
-                InlineKeyboardButton(text="👑 VIP berish", callback_data="vip_add"),
-                InlineKeyboardButton(text="🧹 Premium reset", callback_data="vip_reset"),
-            ],
-            [InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_home")],
-        ]
-    )
-
-
-def kb_admin_channels():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="➕ Kanal qo'shish", callback_data="channel_add"),
-                InlineKeyboardButton(text="🗑 Kanal o'chirish", callback_data="channel_delete"),
-            ],
-            [
-                InlineKeyboardButton(text="📋 Kanallar", callback_data="channel_list"),
-            ],
-            [InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_home")],
-        ]
-    )
-
-
-def kb_admin_payments():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="⏳ Pending", callback_data="payments_pending:0"),
-            ],
-            [
-                InlineKeyboardButton(text="📜 Tarix", callback_data="payments_history:0"),
-            ],
-            [
-                InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_home"),
-            ],
-        ]
-    )
-
-
-def kb_admin_stats():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Yangilash", callback_data="adm_stats")],
-            [InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_home")],
-        ]
-    )
-
-
-# ============================================================
-# 8. ADMIN STATES
-# ============================================================
-
-class AdminFlow(StatesGroup):
-    movie_code = State()
-    movie_name = State()
-    movie_category = State()
-    movie_video = State()
-    movie_description = State()
-
-    delete_movie = State()
-    search_movie = State()
-
-    vip_user = State()
-    vip_days = State()
-    reset_premium = State()
-
-    user_find = State()
-    message_user_target = State()
-    message_user_text = State()
-
-    broadcast = State()
-
-    channel_input = State()
-    channel_delete = State()
-
-
-# ============================================================
-# 9. TEXT TEMPLATES
-# ============================================================
-
-WELCOME_TEXT = """
-<b>🎬 KINO BOT</b>
-
-Siz uchun filmlar olami tayyor! 🍿
-
-✨ <b>Bot imkoniyatlari:</b>
-• 🎬 Kino qidirish
-• 👑 Premium kinolar
-• 🔗 Referral bonuslar
-• 👤 Shaxsiy profil
-• 💳 Qulay to'lov
-• 🔐 Xavfsiz tizim
-
-Quyidagi menyudan kerakli bo'limni tanlang.
-"""
-
-
-def profile_text(user_id: int) -> str:
-    user = get_user(user_id)
-    if not user:
-        return "❌ Profil topilmadi."
-
-    premium = premium_active(user["premium_until"])
-    referral_count = db_scalar(
-        "SELECT COUNT(*) FROM referrals WHERE referrer_id=?",
-        (user_id,),
-        0,
-    )
-    completed = db_scalar(
-        """
-        SELECT COUNT(*)
-        FROM referrals
-        WHERE referrer_id=? AND completed_at IS NOT NULL
-        """,
-        (user_id,),
-        0,
-    )
-
-    status = "🟢 Faol" if premium else "⚪ Faol emas"
-    until = format_date(user["premium_until"]) if premium else "—"
-
-    return (
-        "<b>👤 PROFIL</b>\n\n"
-        f"🆔 ID: <code>{user_id}</code>\n"
-        f"👤 Username: @{escape(user['username']) if user['username'] else '—'}\n"
-        f"👑 Premium: {status}\n"
-        f"⏳ Premiumgacha: {until}\n\n"
-        f"🔗 Taklif qilganlar: <b>{referral_count}</b>\n"
-        f"🎁 Bonusli referral: <b>{completed}</b>\n"
-    )
-
-
-# ============================================================
-# 10. REQUIRED CHANNELS
-# ============================================================
-
-def get_required_channels():
-    return db_fetchall(
-        "SELECT * FROM required_channels ORDER BY id ASC"
-    )
-
-
-async def check_channel_subscription(user_id: int, chat_id: str) -> bool:
+def add_movie(code, name, file_id, category):
+    conn = db()
+    cur = conn.cursor()
     try:
-        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-        status = member.status
+        cur.execute("""
+            INSERT INTO movies(code, name, file_id, category, created_at)
+            VALUES(?,?,?,?,?)
+        """, (normalize_code(code), name.strip(), file_id, category, now_text()))
+        movie_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        return movie_id
+    except sqlite3.IntegrityError:
+        conn.close()
+        return None
 
-        if status in {
-            ChatMemberStatus.CREATOR,
-            ChatMemberStatus.ADMINISTRATOR,
-            ChatMemberStatus.MEMBER,
-        }:
+def delete_movie(code):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM movies WHERE code=?", (normalize_code(code),))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return None
+    cur.execute("DELETE FROM movies WHERE code=?", (normalize_code(code),))
+    conn.commit()
+    conn.close()
+    return row["name"]
+
+def movie_counts():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) c FROM movies")
+    total = cur.fetchone()["c"]
+    cur.execute("SELECT COUNT(*) c FROM movies WHERE category='free'")
+    free = cur.fetchone()["c"]
+    cur.execute("SELECT COUNT(*) c FROM movies WHERE category='premium'")
+    premium = cur.fetchone()["c"]
+    conn.close()
+    return total, free, premium
+
+def increment_movie_stat(user_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE users
+        SET total_movies=total_movies+1, last_seen=?
+        WHERE id=?
+    """, (now_text(), user_id))
+    conn.commit()
+    conn.close()
+    stat_add("movies_sent")
+
+# =========================================================
+# REQUIRED CHANNELS
+# =========================================================
+def all_required_channels():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM required_channels ORDER BY id ASC")
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+def get_required_channel(channel_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM required_channels WHERE id=?", (channel_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+def add_required_channel(chat_id, username, title, invite_link=None):
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO required_channels(chat_id, username, title, invite_link, created_at)
+            VALUES(?,?,?,?,?)
+        """, (int(chat_id), username, title, invite_link, now_text()))
+        row_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        return row_id
+    except sqlite3.IntegrityError:
+        conn.close()
+        return None
+
+def delete_required_channel_by_id(channel_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM required_channels WHERE id=?", (channel_id,))
+    changed = cur.rowcount
+    conn.commit()
+    conn.close()
+    return changed == 1
+
+def channel_join_url(channel):
+    if channel["invite_link"]:
+        return channel["invite_link"]
+    if channel["username"]:
+        return f"https://t.me/{str(channel['username']).lstrip('@')}"
+    return None
+
+async def is_user_subscribed(channel, user_id):
+    try:
+        member = await bot.get_chat_member(chat_id=channel["chat_id"], user_id=user_id)
+        status = getattr(member, "status", None)
+        status = getattr(status, "value", status)
+        if status in ("member", "administrator", "creator"):
             return True
-
-        # aiogram can represent restricted members differently.
-        if str(status).lower() == "restricted":
+        if status == "restricted":
             return bool(getattr(member, "is_member", False))
-
-        return False
-
-    except TelegramBadRequest:
-        logger.warning("Channel check failed for %s / %s", user_id, chat_id)
-        return False
-    except TelegramForbiddenError:
-        logger.warning("Bot has insufficient permissions for channel %s", chat_id)
         return False
     except Exception:
-        logger.exception("Unexpected channel check error")
         return False
 
+async def get_missing_required_channels(user_id):
+    # Agar bot kanalda admin bo'lmasa, tekshiruvdan o'tkazish (xavfsizlik)
+    missing = []
+    for channel in all_required_channels():
+        if not await is_user_subscribed(channel, user_id):
+            missing.append(channel)
+    return missing
 
-async def user_is_subscribed_everywhere(user_id: int) -> bool:
-    channels = get_required_channels()
-    if not channels:
-        return True
-
-    for channel in channels:
-        if not await check_channel_subscription(user_id, channel["chat_id"]):
-            return False
-    return True
-
-
-def required_channels_keyboard():
+def subscription_keyboard(channels):
     rows = []
-    for channel in get_required_channels():
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"📢 {channel['title'][:28]}",
-                    url=channel["invite_link"],
-                )
-            ]
-        )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="✅ Obunani tekshirish",
-                callback_data="check_channels",
-            )
-        ]
-    )
+    for channel in channels:
+        url = channel_join_url(channel)
+        if url:
+            rows.append([InlineKeyboardButton(text=f"📢 {channel['title']}", url=url)])
+    rows.append([InlineKeyboardButton(text="✅ Obunani tekshirish", callback_data="check_subscription")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-
-async def ensure_channel_access(message: Message) -> bool:
-    if await user_is_subscribed_everywhere(message.from_user.id):
+async def require_subscription(message: Message):
+    missing = await get_missing_required_channels(message.from_user.id)
+    if not missing:
         return True
-
-    await message.answer(
-        "<b>🔐 OBUNA TALAB QILINADI</b>\n\n"
-        "Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling:\n\n"
-        "Obuna bo'lgach, <b>✅ Obunani tekshirish</b> tugmasini bosing.",
-        reply_markup=required_channels_keyboard(),
+    text = (
+        "📢 <b>Xush kelibsiz!</b>\n\n"
+        "Botdan to'liq foydalanish va kinolarni ko'rish uchun "
+        "quyidagi kanallarimizga obuna bo'ling:\n\n"
+        "1️⃣ Pastdagi tugmalar orqali kanallarga kiring\n"
+        "2️⃣ <b>Obuna bo'ling</b>\n"
+        "3️⃣ <b>✅ Obunani tekshirish</b> tugmasini bosing."
     )
+    await message.answer(text, reply_markup=subscription_keyboard(missing))
     return False
 
+# =========================================================
+# PAYMENTS
+# =========================================================
+def get_pending_payment_for_user(user_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT * FROM payments
+        WHERE user_id=? AND status='pending'
+        ORDER BY id DESC LIMIT 1
+    """, (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
 
-# ============================================================
-# 11. HOME / USER COMMANDS
-# ============================================================
+def create_payment(user_id, username, first_name, plan_key, file_id, receipt_type):
+    plan = PLANS.get(plan_key)
+    if not plan:
+        return None
+    final_price, discount, referrer_id = referral_price(user_id, plan_key)
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO payments(
+            user_id, username, first_name, plan_key, plan_name,
+            price, original_price, discount_amount, final_price,
+            referral_discount, referrer_id, receipt_file_id, receipt_type,
+            status, created_at
+        )
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending', ?)
+    """, (
+        user_id, username, first_name, plan_key, plan["name"],
+        final_price, plan["price"], discount, final_price,
+        1 if referrer_id else 0, referrer_id, file_id, receipt_type, now_text()
+    ))
+    payment_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    stat_add("receipts")
+    return payment_id
+
+def get_payment(payment_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM payments WHERE id=?", (payment_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+def approve_payment(payment_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM payments WHERE id=?", (payment_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return None
+    if row["status"] == "approved":
+        conn.close()
+        return "already"
+    if row["status"] != "pending":
+        conn.close()
+        return "processed"
+    cur.execute("""
+        UPDATE payments
+        SET status='approved', approved_at=?
+        WHERE id=? AND status='pending'
+    """, (now_text(), payment_id))
+    changed = cur.rowcount
+    conn.commit()
+    conn.close()
+    return row if changed == 1 else "processed"
+
+def reject_payment(payment_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE payments
+        SET status='rejected'
+        WHERE id=? AND status='pending'
+    """, (payment_id,))
+    changed = cur.rowcount
+    conn.commit()
+    conn.close()
+    return changed == 1
+
+def payment_stats():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) c FROM payments WHERE status='pending'")
+    pending = cur.fetchone()["c"]
+    cur.execute("SELECT COUNT(*) c FROM payments WHERE status='approved'")
+    approved = cur.fetchone()["c"]
+    cur.execute("SELECT COUNT(*) c FROM payments WHERE status='rejected'")
+    rejected = cur.fetchone()["c"]
+    cur.execute("SELECT COUNT(DISTINCT user_id) c FROM payments WHERE status='approved'")
+    paid_users = cur.fetchone()["c"]
+    cur.execute("SELECT COALESCE(SUM(COALESCE(final_price, price)),0) s FROM payments WHERE status='approved'")
+    revenue = cur.fetchone()["s"]
+    cur.execute("SELECT COALESCE(SUM(discount_amount),0) s FROM payments WHERE status='approved'")
+    discounts = cur.fetchone()["s"]
+    conn.close()
+    return pending, approved, rejected, paid_users, revenue, discounts
+
+# =========================================================
+# ADMIN AUTH
+# =========================================================
+def is_admin(user_id):
+    return int(user_id) == int(ADMIN_ID)
+
+def admin_ok(user_id):
+    state = ADMIN_STATE.get(user_id)
+    return bool(state and state.get("authenticated"))
+
+def require_admin(obj):
+    uid = obj.from_user.id
+    return is_admin(uid) and admin_ok(uid)
+
+# =========================================================
+# KEYBOARDS
+# =========================================================
+def user_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔎 Kino qidirish", callback_data="user_search")],
+        [
+            InlineKeyboardButton(text="💎 Premium", callback_data="user_premium"),
+            InlineKeyboardButton(text="👤 Profil", callback_data="user_profile"),
+        ],
+        [InlineKeyboardButton(text="👥 Do'st taklif qilish", callback_data="user_referral")],
+    ])
+
+def premium_keyboard(user_id=None):
+    rows = []
+    for key in ("1", "7", "10", "30", "365"):
+        plan = PLANS[key]
+        final, discount, _ = referral_price(user_id, key) if user_id else (plan["price"], 0, None)
+        emoji = "👑" if key == "365" else ("⭐" if key == "30" else "💎")
+        label = f"{emoji} {plan['days']} kun • {money(final)} so'm"
+        if discount:
+            label += " 🔥"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"plan_{key}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def category_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🆓 Oddiy kino", callback_data="category_free")],
+        [InlineKeyboardButton(text="💎 Premium kino", callback_data="category_premium")],
+    ])
+
+def vip_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="1 kun", callback_data="vip_1"),
+            InlineKeyboardButton(text="7 kun", callback_data="vip_7"),
+        ],
+        [
+            InlineKeyboardButton(text="10 kun", callback_data="vip_10"),
+            InlineKeyboardButton(text="30 kun", callback_data="vip_30"),
+        ],
+        [InlineKeyboardButton(text="1 yil", callback_data="vip_365")],
+    ])
+
+def admin_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="➕ Kino qo'shish", callback_data="admin_add_movie"),
+            InlineKeyboardButton(text="🗑 Kino o'chirish", callback_data="admin_delete_movie"),
+        ],
+        [
+            InlineKeyboardButton(text="📚 Kinolar", callback_data="admin_movies"),
+            InlineKeyboardButton(text="👥 Userlar", callback_data="admin_users"),
+        ],
+        [InlineKeyboardButton(text="📊 Statistika", callback_data="admin_stats")],
+        [
+            InlineKeyboardButton(text="🧾 To'lovlar", callback_data="admin_payments"),
+            InlineKeyboardButton(text="💎 Premium berish", callback_data="admin_vip"),
+        ],
+        [InlineKeyboardButton(text="📢 Majburiy obuna", callback_data="admin_channels")],
+        [
+            InlineKeyboardButton(text="💬 Userga xabar", callback_data="admin_message_user"),
+            InlineKeyboardButton(text="📢 Hammaga xabar", callback_data="admin_broadcast"),
+        ],
+        [InlineKeyboardButton(text="🔄 Premium/stat reset", callback_data="admin_reset")],
+        [InlineKeyboardButton(text="🔒 Chiqish", callback_data="admin_logout")],
+    ])
+
+def back_admin_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_back")]
+    ])
+
+def payment_admin_keyboard(payment_id):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ TASDIQLASH", callback_data=f"approve_{payment_id}"),
+            InlineKeyboardButton(text="❌ RAD ETISH", callback_data=f"reject_{payment_id}")
+        ]
+    ])
+
+def channels_admin_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Kanal qo'shish", callback_data="admin_add_channel")],
+        [InlineKeyboardButton(text="📋 Kanallar", callback_data="admin_list_channels")],
+        [InlineKeyboardButton(text="🗑 Kanal o'chirish", callback_data="admin_delete_channel")],
+        [InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_back")],
+    ])
+
+# =========================================================
+# HOME & START
+# =========================================================
+async def send_home(message: Message):
+    user = get_user(message.from_user.id)
+    if not user:
+        create_or_update_user(message)
+        user = get_user(message.from_user.id)
+    
+    if is_premium(message.from_user.id):
+        status = "💎 Premium"
+        premium_line = f"{fmt_dt(user['premium_until'])} • {premium_days_left(message.from_user.id)} kun qoldi"
+    else:
+        status = "🆓 Free"
+        premium_line = "Faol Premium yo'q"
+    
+    await message.answer(
+        "╭━━━━━━━━━━━━━━━━━━━━╮\n"
+        "       🎬 <b>KINO BOT</b>\n"
+        "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"👋 Salom, <b>{esc(message.from_user.first_name)}</b>!\n\n"
+        "🔎 Kino kodini yuboring.\n"
+        "Masalan: <code>101</code>\n\n"
+        f"👑 Status: <b>{status}</b>\n"
+        f"⏳ Premium: <b>{esc(premium_line)}</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "👇 Kerakli bo'limni tanlang:",
+        reply_markup=user_menu(),
+    )
 
 @dp.message(CommandStart())
-async def start_handler(message: Message):
-    args = (message.text or "").split(maxsplit=1)
-    referral_from = None
-
-    if len(args) == 2:
-        payload = args[1].strip()
-        if payload.startswith("ref_"):
-            referral_from = safe_int(payload[4:], 0) or None
-        else:
-            referral_from = safe_int(payload, 0) or None
-
-    is_new = ensure_user(message.from_user, referral_from)
-
-    if is_new:
-        username = f"@{message.from_user.username}" if message.from_user.username else "—"
-        try:
-            await bot.send_message(
-                ADMIN_ID,
-                "<b>🆕 YANGI USER</b>\n\n"
-                f"👤 Ism: {escape(message.from_user.first_name)}\n"
-                f"🔗 Username: {escape(username)}\n"
-                f"🆔 ID: <code>{message.from_user.id}</code>\n"
-                f"🕒 Vaqt: {format_date(now_iso())}",
-            )
-        except Exception:
-            logger.exception("New user admin notification failed")
-
-    if not await ensure_channel_access(message):
+async def cmd_start(message: Message):
+    create_or_update_user(message)
+    
+    # Referral tekshirish
+    ref_id = parse_referral_arg(message)
+    if ref_id:
+        create_referral(referrer_id=ref_id, referred_id=message.from_user.id)
+    
+    # Majburiy obuna tekshiruvi
+    if not await require_subscription(message):
         return
-
-    await message.answer(WELCOME_TEXT, reply_markup=kb_main())
-
-
-@dp.message(Command("cancel"))
-async def cancel_handler(message: Message, state: FSMContext):
-    await state.clear()
-    if is_admin(message.from_user.id):
-        await message.answer(
-            "✅ Jarayon bekor qilindi.",
-            reply_markup=kb_admin(),
-        )
-    else:
-        await message.answer(
-            "✅ Jarayon bekor qilindi.",
-            reply_markup=kb_main(),
-        )
-
-
-@dp.message(Command("admin"))
-async def admin_command(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-    await message.answer(
-        "<b>🛠 ADMIN PANEL</b>\n\nKerakli bo'limni tanlang.",
-        reply_markup=kb_admin(),
+    
+    user_name = html.escape(message.from_user.first_name)
+    start_text = (
+        f"👋 <b>Assalomu alaykum, {user_name}!</b>\n\n"
+        f"🎬 <b>Kino Bot</b>imizga xush kelibsiz!\n\n"
+        f"🍿 Bot orqali sevimli kinolaringizni topishingiz va tomosha qilishingiz mumkin.\n\n"
+        f"👇 Kinoni olish uchun <b>Kino kodi</b>ni yuboring:"
     )
+    await message.answer(text=start_text, reply_markup=user_menu())
 
-
-# ============================================================
-# 12. USER CALLBACKS
-# ============================================================
-
-@dp.callback_query(F.data == "home")
-async def home_callback(callback: CallbackQuery):
-    await safe_answer_callback(callback)
-    if not await user_is_subscribed_everywhere(callback.from_user.id):
-        await safe_edit(
-            callback.message,
-            "<b>🔐 Avval kanallarga obuna bo'ling.</b>",
-            required_channels_keyboard(),
-        )
-        return
-    await safe_edit(callback.message, WELCOME_TEXT, kb_main())
-
-
-@dp.callback_query(F.data == "check_channels")
-async def check_channels_callback(callback: CallbackQuery):
-    if await user_is_subscribed_everywhere(callback.from_user.id):
-        await safe_answer_callback(callback, "✅ Obuna tasdiqlandi!")
-        await safe_edit(callback.message, WELCOME_TEXT, kb_main())
-    else:
-        await safe_answer_callback(callback, "❌ Hali barcha kanallarga obuna bo'lmagansiz.")
-        await safe_edit(
-            callback.message,
-            "<b>❌ Obuna hali to'liq emas.</b>\n\n"
-            "Kanallarga qo'shiling va yana tekshiring.",
-            required_channels_keyboard(),
-        )
-
+# =========================================================
+# USER CALLBACKS
+# =========================================================
+@dp.callback_query(F.data == "user_search")
+async def user_search(callback: CallbackQuery):
+    await callback.message.answer(
+        "🔎 <b>KINO QIDIRISH</b>\n\n"
+        "Kino kodini yuboring.\n"
+        "Masalan: <code>101</code>"
+    )
+    await callback.answer()
 
 @dp.callback_query(F.data == "user_profile")
-async def profile_callback(callback: CallbackQuery):
-    ensure_user(callback.from_user)
-    await safe_answer_callback(callback)
-    if not await user_is_subscribed_everywhere(callback.from_user.id):
-        await safe_edit(
-            callback.message,
-            "<b>🔐 Avval kanallarga obuna bo'ling.</b>",
-            required_channels_keyboard(),
-        )
+async def user_profile(callback: CallbackQuery):
+    user = get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("Profil topilmadi.", show_alert=True)
         return
-    await safe_edit(
-        callback.message,
-        profile_text(callback.from_user.id),
-        InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="🔗 Referral", callback_data="user_referral")],
-                [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="home")],
-            ]
-        ),
-    )
-
-
-@dp.callback_query(F.data == "user_help")
-async def help_callback(callback: CallbackQuery):
-    await safe_answer_callback(callback)
-    text = (
-        "<b>❓ YORDAM</b>\n\n"
-        "🎬 Kino olish uchun kino kodini yuboring.\n"
-        "👑 Premium orqali premium kinolardan foydalaning.\n"
-        "🔗 Referral orqali do'stlaringizni taklif qiling.\n"
-        "💳 To'lovdan keyin chekni botga yuboring.\n\n"
-        "Muammo bo'lsa administratorga murojaat qiling."
-    )
-    await safe_edit(callback.message, text, kb_back("home"))
-
-
-@dp.callback_query(F.data == "user_search")
-async def search_callback(callback: CallbackQuery):
-    await safe_answer_callback(callback)
-    await safe_edit(
-        callback.message,
-        "<b>🔎 KINO QIDIRISH</b>\n\n"
-        "Kino kodini yoki nomini yuboring.\n\n"
-        "Masalan: <code>1234</code>",
-        kb_back("home"),
-    )
-
-
-# ============================================================
-# 13. PREMIUM USER UI
-# ============================================================
-
-@dp.callback_query(F.data == "user_premium")
-async def premium_callback(callback: CallbackQuery):
-    await safe_answer_callback(callback)
-    if not await user_is_subscribed_everywhere(callback.from_user.id):
-        await safe_edit(
-            callback.message,
-            "<b>🔐 Avval kanallarga obuna bo'ling.</b>",
-            required_channels_keyboard(),
-        )
-        return
-
-    referral = active_referral_discount_available(callback.from_user.id)
-
-    extra = ""
-    if referral:
-        extra = (
-            "\n🎁 <b>Referral chegirmasi:</b> "
-            f"{REFERRAL_DISCOUNT_PERCENT}%\n"
-            "Bu chegirma sizning birinchi premium xaridingizga qo'llanadi.\n"
-        )
-
-    await safe_edit(
-        callback.message,
-        "<b>👑 PREMIUM TARIFLAR</b>\n\n"
-        "Premium orqali premium kinolarga kirish imkoniyati ochiladi.\n"
-        f"{extra}\n"
-        "Kerakli tarifni tanlang:",
-        kb_premium(),
-    )
-
-
-@dp.callback_query(F.data.startswith("plan_"))
-async def plan_callback(callback: CallbackQuery):
-    await safe_answer_callback(callback)
-
-    plan_key = callback.data.split("_", 1)[1]
-    plan = PLANS.get(plan_key)
-
-    if not plan:
-        await callback.message.answer("❌ Tarif topilmadi.")
-        return
-
-    has_referral = active_referral_discount_available(callback.from_user.id)
-    final_price, discount = calculate_final_price(plan["price"], has_referral)
-
-    pending = db_fetchone(
-        """
-        SELECT id FROM payments
-        WHERE user_id=? AND status='PENDING'
-        ORDER BY id DESC LIMIT 1
-        """,
-        (callback.from_user.id,),
-    )
-
-    if pending:
-        await safe_edit(
-            callback.message,
-            "<b>⏳ Sizda allaqachon kutilayotgan to'lov mavjud.</b>\n\n"
-            f"🧾 Payment ID: <code>#{pending['id']}</code>\n"
-            "Avval ushbu to'lovni yakunlang yoki administrator bilan bog'laning.",
-            kb_back("user_premium"),
-        )
-        return
-
-    row = db_fetchone(
-        """
-        SELECT id FROM payments
-        WHERE user_id=? AND status='APPROVED'
-        ORDER BY id DESC LIMIT 1
-        """,
-        (callback.from_user.id,),
-    )
-
-    payment = db_execute(
-        """
-        INSERT INTO payments
-        (
-            user_id, plan_key, days, original_price, discount,
-            final_price, referrer_id, has_referral, status, created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
-        """,
-        (
-            callback.from_user.id,
-            plan_key,
-            plan["days"],
-            plan["price"],
-            discount,
-            final_price,
-            get_referral_for_user(callback.from_user.id)["referrer_id"]
-            if has_referral and get_referral_for_user(callback.from_user.id)
-            else None,
-            1 if has_referral else 0,
-            now_iso(),
-        ),
-    )
-    payment_id = payment.lastrowid
-
-    card_text = escape(PAYMENT_CARD) if PAYMENT_CARD else "ADMIN ORQALI BERILADI"
-    owner_text = escape(PAYMENT_OWNER) if PAYMENT_OWNER else "—"
-
-    await safe_edit(
-        callback.message,
-        "<b>💳 TO'LOV</b>\n\n"
-        f"📦 Tarif: <b>{plan['label']}</b>\n"
-        f"💰 Asl narx: <b>{format_money(plan['price'])} so'm</b>\n"
-        f"🎁 Chegirma: <b>{format_money(discount)} so'm</b>\n"
-        f"💵 Yakuniy narx: <b>{format_money(final_price)} so'm</b>\n\n"
-        f"💳 Karta: <code>{card_text}</code>\n"
-        f"👤 Egasi: <b>{owner_text}</b>\n\n"
-        f"🧾 Payment ID: <code>#{payment_id}</code>\n\n"
-        "To'lovni amalga oshirgach, chekni shu botga yuboring.",
-        kb_payment(payment_id),
-    )
-
-
-@dp.callback_query(F.data.startswith("payment_receipt:"))
-async def payment_receipt_callback(callback: CallbackQuery):
-    await safe_answer_callback(
-        callback,
-        "📸 Chekni shu chatga photo yoki rasm document sifatida yuboring.",
-    )
-    payment_id = safe_int(callback.data.split(":", 1)[1], 0)
-
-    payment = db_fetchone(
-        """
-        SELECT * FROM payments
-        WHERE id=? AND user_id=?
-        """,
-        (payment_id, callback.from_user.id),
-    )
-
-    if not payment:
-        return
-
+    
+    active = is_premium(callback.from_user.id)
+    status = "💎 Premium" if active else "🆓 Free"
+    until = fmt_dt(user["premium_until"]) if active else "-"
+    left = f"{premium_days_left(callback.from_user.id)} kun" if active else "0 kun"
+    invited, successful = referral_counts(callback.from_user.id)
+    
     await callback.message.answer(
-        f"<b>📸 CHEK YUBORISH</b>\n\n"
-        f"🧾 Payment ID: <code>#{payment_id}</code>\n"
-        "Endi to'lov chekini photo yoki rasm document sifatida yuboring."
+        "╭━━━━━━━━━━━━━━━━━━━━╮\n"
+        "          👤 <b>PROFIL</b>\n"
+        "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"👤 Ism: <b>{esc(user['first_name'])}</b>\n"
+        f"🔗 Username: {('@' + esc(user['username'])) if user['username'] else 'Username yo‘q'}\n"
+        f"🆔 ID: <code>{user['id']}</code>\n\n"
+        f"👑 Status: <b>{status}</b>\n"
+        f"⏳ Tugash: <code>{until}</code>\n"
+        f"📅 Qolgan: <b>{left}</b>\n"
+        f"🎬 Kinolar: <b>{user['total_movies']}</b>\n"
+        f"👥 Taklif qilingan: <b>{invited}</b>\n"
+        f"🎁 Muvaffaqiyatli referral: <b>{successful}</b>\n"
+        f"🕐 Oxirgi faollik: <code>{esc(user['last_seen'])}</code>\n"
+        f"📅 Ro'yxatdan o'tgan: <code>{esc(user['created_at'])}</code>"
     )
-
-
-# ============================================================
-# 14. REFERRAL USER UI
-# ============================================================
+    await callback.answer()
 
 @dp.callback_query(F.data == "user_referral")
-async def referral_callback(callback: CallbackQuery):
-    await safe_answer_callback(callback)
-
-    me = await bot.get_me()
-    link = f"https://t.me/{me.username}?start=ref_{callback.from_user.id}"
-
-    total = db_scalar(
-        "SELECT COUNT(*) FROM referrals WHERE referrer_id=?",
-        (callback.from_user.id,),
-        0,
-    )
-    completed = db_scalar(
-        """
-        SELECT COUNT(*) FROM referrals
-        WHERE referrer_id=? AND completed_at IS NOT NULL
-        """,
-        (callback.from_user.id,),
-        0,
-    )
-
-    text = (
-        "<b>🔗 REFERAL TIZIMI</b>\n\n"
-        "Do'stingizni botga taklif qiling.\n\n"
-        f"🎁 Har bir taklif qilingan user birinchi marta premium sotib olsa, "
-        f"sizga <b>+{REFERRAL_BONUS_DAYS} kun Premium</b> beriladi.\n"
-        f"💸 Taklif orqali kelgan yangi buyer uchun "
-        f"<b>{REFERRAL_DISCOUNT_PERCENT}% chegirma</b> mavjud.\n\n"
+async def user_referral(callback: CallbackQuery):
+    uid = callback.from_user.id
+    link = await referral_link(uid)
+    total, successful = referral_counts(uid)
+    
+    await callback.message.answer(
+        "👥 <b>DO'ST TAKLIF QILISH</b>\n\n"
+        "Do'stingizni quyidagi havola orqali botga kiriting:\n\n"
+        f"<code>{esc(link or 'Link yaratilmadi')}</code>\n\n"
+        "🎁 <b>Bonus qoidasi:</b>\n"
+        "• Do'stingiz Premium sotib olsa, unga <b>10% chegirma</b> beriladi.\n"
+        "• To'lov admin tomonidan tasdiqlangandan keyin sizga <b>+1 kun Premium</b> beriladi.\n"
+        "• Bonus faqat haqiqiy referral va tasdiqlangan Premium to'lovi uchun beriladi.\n\n"
         f"👥 Takliflar: <b>{total}</b>\n"
-        f"🏆 Premium xarid qilganlar: <b>{completed}</b>\n\n"
-        f"🔗 <b>Sizning linkingiz:</b>\n<code>{escape(link)}</code>"
+        f"✅ Muvaffaqiyatli: <b>{successful}</b>",
     )
+    await callback.answer()
 
-    await safe_edit(
-        callback.message,
-        text,
-        kb_back("home"),
-    )
-
-
-# ============================================================
-# 15. MOVIE SEARCH / DELIVERY
-# ============================================================
-
-def movie_card(movie) -> str:
-    badge = "👑 PREMIUM" if movie["category"].lower() == "premium" else "🆓 FREE"
-    description = movie["description"] or "Film haqida qo'shimcha ma'lumot mavjud emas."
-    return (
-        f"<b>🎬 {escape(movie['name'])}</b>\n\n"
-        f"🔢 Kod: <code>{escape(movie['code'])}</code>\n"
-        f"🏷 Kategoriya: <b>{badge}</b>\n"
-        f"👁 Ko'rishlar: <b>{movie['views']}</b>\n\n"
-        f"{escape(description)[:600]}"
-    )
-
-
-async def deliver_movie(message: Message, movie):
-    category = movie["category"].lower()
-    user = get_user(message.from_user.id)
-
-    if category == "premium" and not premium_active(user["premium_until"]):
-        await message.answer(
-            "<b>👑 PREMIUM KINO</b>\n\n"
-            "Bu film faqat Premium foydalanuvchilar uchun.\n\n"
-            "Premium tariflardan birini tanlang:",
-            reply_markup=kb_premium(),
+@dp.callback_query(F.data == "user_premium")
+async def user_premium(callback: CallbackQuery):
+    uid = callback.from_user.id
+    
+    if is_premium(uid):
+        await callback.message.answer(
+            "💎 <b>PREMIUM FAOL</b>\n\n"
+            f"⏳ Tugash: <code>{fmt_dt(premium_until(uid))}</code>\n"
+            f"📅 Qolgan: <b>{premium_days_left(uid)} kun</b>"
         )
+        await callback.answer()
         return
-
-    if category == "free" and not premium_active(user["premium_until"]):
-        if not consume_free_movie(message.from_user.id):
-            await message.answer(
-                "<b>⛔ Bugungi bepul limit tugadi.</b>\n\n"
-                f"Kunlik limit: <b>{FREE_DAILY_LIMIT}</b> ta kino.\n"
-                "Premium orqali cheklovsiz foydalanishingiz mumkin.",
-                reply_markup=kb_premium(),
-            )
-            return
-
-    db_execute(
-        "UPDATE movies SET views=views+1 WHERE id=?",
-        (movie["id"],),
+    
+    has_referral = bool(get_active_referral_for_user(uid))
+    text = (
+        "╭━━━━━━━━━━━━━━━━━━━━╮\n"
+        "       💎 <b>PREMIUM</b>\n"
+        "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        "Tarifni tanlang:"
     )
-
-    try:
-        if movie["file_type"] == "video":
-            await message.answer_video(
-                movie["file_id"],
-                caption=(
-                    f"🎬 <b>{escape(movie['name'])}</b>\n"
-                    f"🔢 Kod: <code>{escape(movie['code'])}</code>"
-                ),
-            )
-        elif movie["file_type"] == "document":
-            await message.answer_document(
-                movie["file_id"],
-                caption=f"🎬 <b>{escape(movie['name'])}</b>",
-            )
-        elif movie["file_type"] == "animation":
-            await message.answer_animation(
-                movie["file_id"],
-                caption=f"🎬 <b>{escape(movie['name'])}</b>",
-            )
-        else:
-            await message.answer(
-                "❌ Ushbu media turi qo'llab-quvvatlanmaydi."
-            )
-    except TelegramBadRequest:
-        logger.exception("Movie delivery failed")
-        await message.answer(
-            "❌ Filmni yuborishda Telegram xatoligi yuz berdi. "
-            "Administratorga xabar berildi."
-        )
-
-
-def search_movies(query: str):
-    q = query.strip()
-    if not q:
-        return []
-
-    return db_fetchall(
-        """
-        SELECT * FROM movies
-        WHERE code=? COLLATE NOCASE
-           OR name LIKE ? COLLATE NOCASE
-        ORDER BY id DESC
-        LIMIT 10
-        """,
-        (q, f"%{q}%"),
+    if has_referral:
+        text += "\n\n🔥 <b>Referral chegirmasi faol!</b>\nSizga Premium tariflarida <b>10% chegirma</b> beriladi."
+    text += (
+        "\n\n💳 <b>To'lov:</b>\n"
+        f"<code>{esc(PAYMENT_CARD or 'Admin bilan bog‘laning')}</code>\n"
+        f"👤 {esc(PAYMENT_OWNER or '-')}\n\n"
+        "1️⃣ Tarifni tanlang.\n"
+        "2️⃣ To'lov qiling.\n"
+        "3️⃣ Chekni shu botga yuboring.\n"
+        "4️⃣ Admin tekshiradi.\n"
+        "5️⃣ Tasdiqlangach Premium avtomatik ochiladi."
     )
+    await callback.message.answer(text, reply_markup=premium_keyboard(uid))
+    await callback.answer()
 
-
-@dp.message(F.text)
-async def universal_text_handler(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    text = (message.text or "").strip()
-
-    current = await state.get_state()
-
-    # Admin FSM is handled first.
-    if is_admin(user_id) and current:
-        await handle_admin_state_text(message, state, text)
+@dp.callback_query(F.data.startswith("plan_"))
+async def choose_plan(callback: CallbackQuery):
+    uid = callback.from_user.id
+    key = callback.data.replace("plan_", "", 1)
+    
+    if key not in PLANS:
+        await callback.answer("Tarif topilmadi.", show_alert=True)
         return
-
-    if text.startswith("/"):
+    if is_premium(uid):
+        await callback.answer("Sizda Premium hali faol.", show_alert=True)
         return
-
-    if not await ensure_channel_access(message):
+    
+    pending = get_pending_payment_for_user(uid)
+    if pending:
+        await callback.answer(f"Sizda #{pending['id']} raqamli kutilayotgan to'lov bor.", show_alert=True)
         return
-
-    ensure_user(message.from_user)
-
-    movies = search_movies(text)
-
-    if not movies:
-        await message.answer(
-            "❌ <b>Kino topilmadi.</b>\n\n"
-            "Kino kodini yoki nomini to'g'ri yuboring.\n"
-            "Masalan: <code>1234</code>",
-            reply_markup=kb_main(),
-        )
-        return
-
-    if len(movies) == 1:
-        await deliver_movie(message, movies[0])
-        return
-
-    buttons = []
-    for movie in movies:
-        icon = "👑" if movie["category"].lower() == "premium" else "🎬"
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text=f"{icon} {movie['name'][:35]}",
-                    callback_data=f"movie_view:{movie['id']}",
-                )
-            ]
-        )
-    buttons.append(
-        [InlineKeyboardButton(text="⬅️ Menyu", callback_data="home")]
+    
+    USER_PAYMENT_PLAN[uid] = key
+    plan = PLANS[key]
+    final, discount, _ = referral_price(uid, key)
+    
+    if discount:
+        price_text = f"<s>{money(plan['price'])} so'm</s> → <b>{money(final)} so'm</b>\n🔥 Chegirma: <b>{money(discount)} so'm</b>"
+    else:
+        price_text = f"<b>{money(final)} so'm</b>"
+    
+    await callback.message.answer(
+        "🧾 <b>TARIF TANLANDI</b>\n\n"
+        f"💎 Tarif: <b>{esc(plan['name'])}</b>\n"
+        f"💰 Summa: {price_text}\n\n"
+        "Endi to'lovni amalga oshiring.\n"
+        "Keyin chek rasmini shu botga yuboring.\n\n"
+        "Bekor qilish: <code>/cancel</code>"
     )
+    await callback.answer()
 
-    await message.answer(
-        f"<b>🔎 {len(movies)} ta natija topildi</b>\n\n"
-        "Kerakli filmni tanlang:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+# =========================================================
+# RECEIPTS
+# =========================================================
+async def notify_admin_about_receipt(payment_id, user_id, first_name, username, payment, file_id, receipt_type, message_text=""):
+    original = payment["original_price"] or payment["price"]
+    final = payment["final_price"] or payment["price"]
+    discount = payment["discount_amount"] or 0
+    
+    caption = (
+        "🧾 <b>YANGI TO'LOV</b>\n\n"
+        f"🧾 To'lov ID: <code>#{payment_id}</code>\n"
+        f"👤 Ism: <b>{esc(first_name)}</b>\n"
+        f"🔗 Username: {('@' + esc(username)) if username else 'Username yo‘q'}\n"
+        f"🆔 User ID: <code>{user_id}</code>\n\n"
+        f"💎 Tarif: <b>{esc(payment['plan_name'])}</b>\n"
+        f"💰 Asl summa: <b>{money(original)} so'm</b>\n"
     )
-
-
-@dp.callback_query(F.data.startswith("movie_view:"))
-async def movie_view_callback(callback: CallbackQuery):
-    await safe_answer_callback(callback)
-    movie_id = safe_int(callback.data.split(":", 1)[1], 0)
-    movie = get_movie_by_id(movie_id)
-
-    if not movie:
-        await callback.message.answer("❌ Kino topilmadi.")
-        return
-
-    user = get_user(callback.from_user.id) or ensure_user(callback.from_user)
-    if not user:
-        user = get_user(callback.from_user.id)
-
-    if movie["category"].lower() == "premium" and not premium_active(user["premium_until"]):
-        await safe_edit(
-            callback.message,
-            movie_card(movie)
-            + "\n\n🔒 <b>Bu film Premium uchun.</b>",
-            kb_premium(),
-        )
-        return
-
-    await safe_edit(
-        callback.message,
-        movie_card(movie),
-        InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="▶️ Kinoni olish",
-                        callback_data=f"movie_send:{movie['id']}",
-                    )
-                ],
-                [InlineKeyboardButton(text="⬅️ Menyu", callback_data="home")],
-            ]
-        ),
-    )
-
-
-@dp.callback_query(F.data.startswith("movie_send:"))
-async def movie_send_callback(callback: CallbackQuery):
-    await safe_answer_callback(callback)
-    movie_id = safe_int(callback.data.split(":", 1)[1], 0)
-    movie = get_movie_by_id(movie_id)
-    if not movie:
-        await callback.message.answer("❌ Kino topilmadi.")
-        return
-    await deliver_movie(callback.message, movie)
-
-
-# ============================================================
-# 16. RECEIPT HANDLERS
-# ============================================================
-
-async def find_user_pending_payment(user_id: int):
-    return db_fetchone(
-        """
-        SELECT * FROM payments
-        WHERE user_id=? AND status='PENDING'
-        ORDER BY id DESC LIMIT 1
-        """,
-        (user_id,),
-    )
-
-
-async def handle_receipt(
-    message: Message,
-    receipt_type: str,
-    file_id: str,
-):
-    user_id = message.from_user.id
-    ensure_user(message.from_user)
-
-    payment = await find_user_pending_payment(user_id)
-    if not payment:
-        await message.answer(
-            "❌ Sizda kutilayotgan to'lov topilmadi.\n\n"
-            "Avval Premium bo'limidan tarif tanlang.",
-            reply_markup=kb_premium(),
-        )
-        return
-
-    db_execute(
-        """
-        UPDATE payments
-        SET receipt_file_id=?, receipt_type=?
-        WHERE id=? AND status='PENDING'
-        """,
-        (file_id, receipt_type, payment["id"]),
-    )
-
-    referral_text = "Ha" if payment["has_referral"] else "Yo'q"
-    user = get_user(user_id)
-    username = f"@{user['username']}" if user and user["username"] else "—"
-
-    admin_text = (
-        "<b>💳 YANGI TO'LOV CHEKI</b>\n\n"
-        f"🧾 Payment ID: <code>#{payment['id']}</code>\n"
-        f"👤 User: {escape(username)}\n"
-        f"🆔 ID: <code>{user_id}</code>\n"
-        f"📦 Plan: <b>{escape(PLANS[payment['plan_key']]['label'])}</b>\n"
-        f"💰 Original: <b>{format_money(payment['original_price'])} so'm</b>\n"
-        f"🎁 Discount: <b>{format_money(payment['discount'])} so'm</b>\n"
-        f"💵 Final: <b>{format_money(payment['final_price'])} so'm</b>\n"
-        f"🔗 Referral: <b>{referral_text}</b>\n\n"
-        "Chekni tekshiring."
-    )
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ TASDIQLASH",
-                    callback_data=f"approve_payment:{payment['id']}",
-                ),
-                InlineKeyboardButton(
-                    text="❌ RAD ETISH",
-                    callback_data=f"reject_payment:{payment['id']}",
-                ),
-            ]
-        ]
-    )
-
-    try:
-        if receipt_type == "photo":
-            await bot.send_photo(
-                ADMIN_ID,
-                file_id,
-                caption=admin_text,
-                reply_markup=keyboard,
-            )
-        else:
-            await bot.send_document(
-                ADMIN_ID,
-                file_id,
-                caption=admin_text,
-                reply_markup=keyboard,
-            )
-    except Exception:
-        logger.exception("Receipt notification to admin failed")
-        await message.answer(
-            "⚠️ Chek saqlandi, lekin administratorga yuborishda xatolik bo'ldi."
-        )
-        return
-
-    await message.answer(
-        "<b>✅ CHEK QABUL QILINDI</b>\n\n"
-        f"🧾 Payment ID: <code>#{payment['id']}</code>\n"
-        "Administrator tekshirganidan so'ng Premium faollashadi.",
-        reply_markup=kb_main(),
-    )
-
+    if discount:
+        caption += f"🔥 Referral chegirma: <b>-{money(discount)} so'm</b>\n"
+    caption += f"💳 To'lanadigan: <b>{money(final)} so'm</b>\n"
+    caption += f"🕐 Vaqt: <code>{now_text()}</code>\n"
+    if payment["referrer_id"]:
+        caption += f"👥 Referrer ID: <code>{payment['referrer_id']}</code>\n"
+    if message_text:
+        caption += f"\n📝 User izohi: <i>{esc(message_text[:700])}</i>"
+    
+    markup = payment_admin_keyboard(payment_id)
+    
+    if receipt_type == "photo":
+        await bot.send_photo(chat_id=ADMIN_ID, photo=file_id, caption=caption, reply_markup=markup)
+    else:
+        await bot.send_document(chat_id=ADMIN_ID, document=file_id, caption=caption, reply_markup=markup)
 
 @dp.message(F.photo)
 async def receipt_photo_handler(message: Message):
-    if not message.photo:
-        return
-    await handle_receipt(
-        message,
-        "photo",
-        message.photo[-1].file_id,
-    )
-
+    await handle_receipt(message, "photo", message.photo[-1].file_id)
 
 @dp.message(F.document)
 async def receipt_document_handler(message: Message):
-    if not message.document:
-        return
-    mime = message.document.mime_type or ""
-    if mime and not mime.startswith("image/"):
-        return
-    await handle_receipt(
-        message,
-        "document",
-        message.document.file_id,
-    )
-
-
-# ============================================================
-# 17. PAYMENT APPROVAL / REJECTION
-# ============================================================
-
-@dp.callback_query(F.data.startswith("approve_payment:"))
-async def approve_payment_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-
-    payment_id = safe_int(callback.data.split(":", 1)[1], 0)
-
-    with closing(connect_db()) as conn:
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-
-            payment = conn.execute(
-                "SELECT * FROM payments WHERE id=?",
-                (payment_id,),
-            ).fetchone()
-
-            if not payment:
-                conn.rollback()
-                await safe_answer_callback(callback, "❌ Payment topilmadi.")
-                return
-
-            if payment["status"] == "APPROVED":
-                conn.rollback()
-                await safe_answer_callback(callback, "ℹ️ Bu payment allaqachon tasdiqlangan.")
-                return
-
-            if payment["status"] == "REJECTED":
-                conn.rollback()
-                await safe_answer_callback(callback, "❌ Bu payment rad etilgan.")
-                return
-
-            conn.execute(
-                """
-                UPDATE payments
-                SET status='APPROVED', approved_at=?, approved_by=?
-                WHERE id=? AND status='PENDING'
-                """,
-                (now_iso(), callback.from_user.id, payment_id),
-            )
-
-            user = conn.execute(
-                "SELECT * FROM users WHERE id=?",
-                (payment["user_id"],),
-            ).fetchone()
-
-            if not user:
-                conn.rollback()
-                await safe_answer_callback(callback, "❌ User topilmadi.")
-                return
-
-            current = parse_datetime(user["premium_until"])
-            base = current if current and current > now_local() else now_local()
-            new_until = base + timedelta(days=payment["days"])
-
-            conn.execute(
-                "UPDATE users SET premium_until=? WHERE id=?",
-                (
-                    new_until.isoformat(timespec="seconds"),
-                    payment["user_id"],
-                ),
-            )
-
-            # Referral reward is idempotent.
-            referral = conn.execute(
-                """
-                SELECT * FROM referrals
-                WHERE invited_id=?
-                """,
-                (payment["user_id"],),
-            ).fetchone()
-
-            referrer_id = None
-            reward_given = False
-
-            if referral and not referral["reward_given"] and not referral["completed_at"]:
-                referrer_id = referral["referrer_id"]
-
-                ref_user = conn.execute(
-                    "SELECT * FROM users WHERE id=?",
-                    (referrer_id,),
-                ).fetchone()
-
-                if ref_user:
-                    ref_current = parse_datetime(ref_user["premium_until"])
-                    ref_base = (
-                        ref_current
-                        if ref_current and ref_current > now_local()
-                        else now_local()
-                    )
-                    ref_until = ref_base + timedelta(days=REFERRAL_BONUS_DAYS)
-
-                    conn.execute(
-                        "UPDATE users SET premium_until=? WHERE id=?",
-                        (
-                            ref_until.isoformat(timespec="seconds"),
-                            referrer_id,
-                        ),
-                    )
-
-                    conn.execute(
-                        """
-                        UPDATE referrals
-                        SET completed_at=?, reward_given=1
-                        WHERE id=? AND reward_given=0 AND completed_at IS NULL
-                        """,
-                        (now_iso(), referral["id"]),
-                    )
-
-                    conn.execute(
-                        "UPDATE users SET referral_completed=1 WHERE id=?",
-                        (payment["user_id"],),
-                    )
-
-                    reward_given = True
-
-            conn.commit()
-
-        except Exception:
-            conn.rollback()
-            logger.exception("Payment approval transaction failed")
-            await safe_answer_callback(callback, "❌ Payment tasdiqlanmadi.")
+    if message.document and message.document.mime_type:
+        if not message.document.mime_type.startswith("image/"):
             return
+    await handle_receipt(message, "document", message.document.file_id)
 
-    await safe_answer_callback(callback, "✅ Payment tasdiqlandi.")
-
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-
-    await bot.send_message(
-        payment["user_id"],
-        "<b>🎉 PREMIUM FAOLLASHTIRILDI!</b>\n\n"
-        f"📦 Tarif: <b>{escape(PLANS[payment['plan_key']]['label'])}</b>\n"
-        f"⏳ Premiumgacha: <b>{format_date(new_until.isoformat())}</b>\n\n"
-        "Endi Premium kinolardan foydalanishingiz mumkin.",
-        reply_markup=kb_main(),
+async def handle_receipt(message: Message, receipt_type, file_id):
+    uid = message.from_user.id
+    if is_admin(uid):
+        return
+    create_or_update_user(message)
+    
+    plan_key = USER_PAYMENT_PLAN.get(uid)
+    if not plan_key:
+        await message.answer("⚠️ Avval <b>💎 Premium</b> bo'limidan tarif tanlang.\n\nKeyin chekni yuboring.")
+        return
+    if is_premium(uid):
+        USER_PAYMENT_PLAN.pop(uid, None)
+        await message.answer("ℹ️ Sizda Premium hali faol. Yangi to'lov qabul qilinmadi.")
+        return
+    
+    pending = get_pending_payment_for_user(uid)
+    if pending:
+        USER_PAYMENT_PLAN.pop(uid, None)
+        await message.answer(
+            "⏳ Sizning oldingi to'lovingiz hali tekshirilmoqda.\n\n"
+            f"🧾 To'lov ID: <code>#{pending['id']}</code>\n"
+            "Admin tasdiqlashini kuting."
+        )
+        return
+    
+    plan = PLANS.get(plan_key)
+    if not plan:
+        USER_PAYMENT_PLAN.pop(uid, None)
+        await message.answer("❌ Tarif topilmadi.")
+        return
+    
+    payment_id = create_payment(
+        user_id=uid,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        plan_key=plan_key,
+        file_id=file_id,
+        receipt_type=receipt_type,
     )
+    if not payment_id:
+        await message.answer("❌ To'lovni saqlashda xatolik.")
+        return
+    
+    payment = get_payment(payment_id)
+    try:
+        await notify_admin_about_receipt(
+            payment_id=payment_id,
+            user_id=uid,
+            first_name=message.from_user.first_name,
+            username=message.from_user.username,
+            payment=payment,
+            file_id=file_id,
+            receipt_type=receipt_type,
+            message_text=message.caption or "",
+        )
+        USER_PAYMENT_PLAN.pop(uid, None)
+        
+        original = payment["original_price"] or payment["price"]
+        final = payment["final_price"] or payment["price"]
+        discount = payment["discount_amount"] or 0
+        price_text = f"{money(final)} so'm" if not discount else f"{money(final)} so'm (10% referral chegirma)"
+        
+        await message.answer(
+            "✅ <b>CHEK QABUL QILINDI</b>\n\n"
+            f"🧾 ID: <code>#{payment_id}</code>\n"
+            f"💎 Tarif: <b>{esc(plan['name'])}</b>\n"
+            f"💰 Asl: <s>{money(original)} so'm</s>\n"
+            f"💳 To'lov: <b>{price_text}</b>\n\n"
+            "⏳ Chek admin chatiga yuborildi.\n"
+            "Admin tasdiqlagach Premium avtomatik ochiladi."
+        )
+    except Exception:
+        logging.exception("Receipt delivery error")
+        await message.answer("⚠️ Chek bazaga saqlandi, ammo admin chatiga yuborishda xatolik bo'ldi.")
 
-    if reward_given and referrer_id:
+# =========================================================
+# APPROVE / REJECT
+# =========================================================
+@dp.callback_query(F.data.startswith("approve_"))
+async def approve_callback(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q.", show_alert=True)
+        return
+    try:
+        payment_id = int(callback.data.replace("approve_", "", 1))
+    except ValueError:
+        await callback.answer("ID noto'g'ri.", show_alert=True)
+        return
+    
+    result = approve_payment(payment_id)
+    if result is None:
+        await callback.answer("To'lov topilmadi.", show_alert=True)
+        return
+    if result in ("already", "processed"):
+        await callback.answer("Bu to'lov allaqachon ko'rib chiqilgan.", show_alert=True)
+        return
+    
+    plan = PLANS.get(result["plan_key"])
+    if not plan:
+        await callback.answer("Tarif topilmadi.", show_alert=True)
+        return
+    
+    uid = result["user_id"]
+    if not get_user(uid):
+        await callback.answer("User topilmadi.", show_alert=True)
+        return
+    
+    new_until = activate_premium(uid, plan["days"])
+    if not new_until:
+        await callback.answer("Premium ochilmadi.", show_alert=True)
+        return
+    
+    stat_add("approved_payments")
+    
+    # Referral bonus
+    referral = None
+    if result["referrer_id"]:
+        referral = complete_referral(uid, payment_id)
+    if referral:
+        referrer_id = referral["referrer_id"]
+        referrer_until = activate_premium(referrer_id, 1)
+        stat_add("referral_rewards")
         try:
             await bot.send_message(
                 referrer_id,
-                "<b>🎁 REFERAL BONUS!</b>\n\n"
-                f"Sizning taklifingiz Premium sotib oldi.\n"
-                f"Hisobingizga <b>+{REFERRAL_BONUS_DAYS} kun Premium</b> qo'shildi!",
+                "🎁 <b>REFERRAL BONUS!</b>\n\n"
+                f"👤 Siz taklif qilgan user Premium sotib oldi.\n"
+                "💎 Sizga <b>+1 kun Premium</b> qo'shildi.\n"
+                f"⏳ Yangi tugash: <code>{fmt_dt(referrer_until)}</code>",
             )
         except Exception:
-            logger.exception("Referral reward notification failed")
-
-
-@dp.callback_query(F.data.startswith("reject_payment:"))
-async def reject_payment_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-
-    payment_id = safe_int(callback.data.split(":", 1)[1], 0)
-
-    payment = db_fetchone(
-        "SELECT * FROM payments WHERE id=?",
-        (payment_id,),
-    )
-
-    if not payment:
-        await safe_answer_callback(callback, "❌ Payment topilmadi.")
-        return
-
-    if payment["status"] != "PENDING":
-        await safe_answer_callback(
-            callback,
-            f"ℹ️ Payment statusi: {payment['status']}",
-        )
-        return
-
-    db_execute(
-        """
-        UPDATE payments
-        SET status='REJECTED', rejected_at=?
-        WHERE id=? AND status='PENDING'
-        """,
-        (now_iso(), payment_id),
-    )
-
-    await safe_answer_callback(callback, "❌ Payment rad etildi.")
-
+            logging.exception("Referral reward notification failed")
+    
     try:
-        await callback.message.edit_reply_markup(reply_markup=None)
+        discount = result["discount_amount"] or 0
+        paid = result["final_price"] or result["price"]
+        extra = ""
+        if discount:
+            extra = f"\n🔥 Referral chegirma: <b>-{money(discount)} so'm</b>\n💳 To'langan: <b>{money(paid)} so'm</b>"
+        
+        await bot.send_message(
+            uid,
+            "🎉 <b>PREMIUM FAOLLASHDI</b>\n\n"
+            f"💎 Tarif: <b>{esc(plan['name'])}</b>\n"
+            f"⏳ Tugash: <code>{fmt_dt(new_until)}</code>\n"
+            f"📅 Muddat: <b>{plan['days']} kun</b>"
+            f"{extra}\n\n"
+            "✅ To'lovingiz tasdiqlandi.\n"
+            "🍿 Yoqimli tomosha!",
+        )
     except Exception:
-        pass
+        logging.exception("Approved-user notification failed")
+    
+    try:
+        caption = (
+            "✅ <b>TO'LOV TASDIQLANDI</b>\n\n"
+            f"🧾 ID: <code>#{payment_id}</code>\n"
+            f"🆔 User: <code>{uid}</code>\n"
+            f"💎 Tarif: <b>{esc(plan['name'])}</b>\n"
+            f"💳 To'langan: <b>{money(result['final_price'] or result['price'])} so'm</b>\n"
+            f"⏳ Tugash: <code>{fmt_dt(new_until)}</code>\n"
+        )
+        if referral:
+            caption += f"\n🎁 Referrer: <code>{referral['referrer_id']}</code>\n🎁 Bonus: <b>+1 kun berildi</b>\n"
+        caption += "\nStatus: <b>APPROVED</b>"
+        
+        await callback.message.edit_caption(caption=caption)
+    except Exception:
+        logging.exception("Could not edit receipt caption")
+    
+    await callback.answer("Premium ochildi!")
 
+@dp.callback_query(F.data.startswith("reject_"))
+async def reject_callback(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q.", show_alert=True)
+        return
+    try:
+        payment_id = int(callback.data.replace("reject_", "", 1))
+    except ValueError:
+        await callback.answer("ID noto'g'ri.", show_alert=True)
+        return
+    
+    payment = get_payment(payment_id)
+    if not payment:
+        await callback.answer("To'lov topilmadi.", show_alert=True)
+        return
+    if not reject_payment(payment_id):
+        await callback.answer("Bu to'lov allaqachon ko'rib chiqilgan.", show_alert=True)
+        return
+    
+    stat_add("rejected_payments")
+    uid = payment["user_id"]
+    
     try:
         await bot.send_message(
-            payment["user_id"],
-            "<b>❌ TO'LOV RAD ETILDI</b>\n\n"
-            f"🧾 Payment ID: <code>#{payment_id}</code>\n"
-            "Chekni qayta tekshirib, kerak bo'lsa yangi to'lov yuboring.",
-            reply_markup=kb_premium(),
+            uid,
+            "❌ <b>TO'LOV RAD ETILDI</b>\n\n"
+            f"🧾 ID: <code>#{payment_id}</code>\n"
+            f"💎 Tarif: <b>{esc(payment['plan_name'])}</b>\n\n"
+            "Chekni qayta tekshiring va kerak bo'lsa yangi chek yuboring.",
         )
     except Exception:
-        logger.exception("Payment rejection notification failed")
-
-
-# ============================================================
-# 18. ADMIN HOME
-# ============================================================
-
-@dp.callback_query(F.data == "admin_home")
-async def admin_home_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-    await safe_answer_callback(callback)
-    await safe_edit(
-        callback.message,
-        "<b>🛠 ADMIN PANEL</b>\n\n"
-        "Botni boshqarish uchun bo'limni tanlang.",
-        kb_admin(),
-    )
-
-
-@dp.callback_query(F.data == "adm_movies")
-async def adm_movies_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-    await safe_answer_callback(callback)
-    total = db_scalar("SELECT COUNT(*) FROM movies", default=0)
-    await safe_edit(
-        callback.message,
-        "<b>🎬 KINOLAR</b>\n\n"
-        f"Jami kinolar: <b>{total}</b>\n\n"
-        "Kerakli amalni tanlang:",
-        kb_admin_movies(),
-    )
-
-
-@dp.callback_query(F.data == "adm_users")
-async def adm_users_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-    await safe_answer_callback(callback)
-    total = db_scalar("SELECT COUNT(*) FROM users", default=0)
-    active = db_scalar(
-        """
-        SELECT COUNT(*) FROM users
-        WHERE premium_until IS NOT NULL
-        AND premium_until > ?
-        """,
-        (now_local().isoformat(),),
-        0,
-    )
-    await safe_edit(
-        callback.message,
-        "<b>👥 USERLAR</b>\n\n"
-        f"👥 Jami: <b>{total}</b>\n"
-        f"👑 Aktiv Premium: <b>{active}</b>",
-        kb_admin_users(),
-    )
-
-
-@dp.callback_query(F.data == "adm_payments")
-async def adm_payments_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-    await safe_answer_callback(callback)
-    pending = db_scalar(
-        "SELECT COUNT(*) FROM payments WHERE status='PENDING'",
-        default=0,
-    )
-    approved = db_scalar(
-        "SELECT COUNT(*) FROM payments WHERE status='APPROVED'",
-        default=0,
-    )
-    await safe_edit(
-        callback.message,
-        "<b>💳 TO'LOVLAR</b>\n\n"
-        f"⏳ Pending: <b>{pending}</b>\n"
-        f"✅ Approved: <b>{approved}</b>",
-        kb_admin_payments(),
-    )
-
-
-# ============================================================
-# 19. ADMIN MOVIE CRUD
-# ============================================================
-
-@dp.callback_query(F.data == "movie_add")
-async def movie_add_callback(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-
-    await state.clear()
-    await state.set_state(AdminFlow.movie_code)
-    await safe_answer_callback(callback)
-    await callback.message.answer(
-        "<b>➕ KINO QO'SHISH</b>\n\n"
-        "1/5 — Kino kodini yuboring.\n\n"
-        "Masalan: <code>1234</code>\n\n"
-        "/cancel — bekor qilish"
-    )
-
-
-@dp.callback_query(F.data == "movie_delete")
-async def movie_delete_callback(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-
-    await state.clear()
-    await state.set_state(AdminFlow.delete_movie)
-    await safe_answer_callback(callback)
-    await callback.message.answer(
-        "<b>🗑 KINO O'CHIRISH</b>\n\n"
-        "Kino kodini yuboring.\n"
-        "/cancel — bekor qilish"
-    )
-
-
-@dp.callback_query(F.data == "movie_search_admin")
-async def movie_search_admin_callback(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-
-    await state.clear()
-    await state.set_state(AdminFlow.search_movie)
-    await safe_answer_callback(callback)
-    await callback.message.answer(
-        "<b>🔎 KINO QIDIRISH</b>\n\n"
-        "Kod yoki nom yuboring."
-    )
-
-
-@dp.callback_query(F.data.startswith("movie_list:"))
-async def movie_list_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-
-    page = max(0, safe_int(callback.data.split(":", 1)[1], 0))
-    offset = page * PAGE_SIZE
-
-    rows = db_fetchall(
-        """
-        SELECT * FROM movies
-        ORDER BY id DESC
-        LIMIT ? OFFSET ?
-        """,
-        (PAGE_SIZE, offset),
-    )
-    total = db_scalar("SELECT COUNT(*) FROM movies", default=0)
-
-    lines = ["<b>📋 KINO RO'YXATI</b>\n"]
-    if not rows:
-        lines.append("❌ Kino mavjud emas.")
-    else:
-        for movie in rows:
-            icon = "👑" if movie["category"] == "premium" else "🎬"
-            lines.append(
-                f"{icon} <b>{escape(movie['name'])}</b> — "
-                f"<code>{escape(movie['code'])}</code>"
-            )
-
-    nav = []
-    if page > 0:
-        nav.append(
-            InlineKeyboardButton(
-                text="⬅️",
-                callback_data=f"movie_list:{page - 1}",
-            )
-        )
-    if offset + PAGE_SIZE < total:
-        nav.append(
-            InlineKeyboardButton(
-                text="➡️",
-                callback_data=f"movie_list:{page + 1}",
-            )
-        )
-
-    buttons = []
-    if nav:
-        buttons.append(nav)
-    buttons.append(
-        [InlineKeyboardButton(text="⬅️ Kinolar", callback_data="adm_movies")]
-    )
-
-    await safe_answer_callback(callback)
-    await safe_edit(
-        callback.message,
-        "\n".join(lines),
-        InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
-
-
-# ============================================================
-# 20. ADMIN USER MANAGEMENT
-# ============================================================
-
-@dp.callback_query(F.data == "user_find")
-async def user_find_callback(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-    await state.clear()
-    await state.set_state(AdminFlow.user_find)
-    await safe_answer_callback(callback)
-    await callback.message.answer(
-        "<b>🔎 USER TOPISH</b>\n\n"
-        "Telegram ID yoki username yuboring."
-    )
-
-
-@dp.callback_query(F.data.startswith("user_list:"))
-async def user_list_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-
-    page = max(0, safe_int(callback.data.split(":", 1)[1], 0))
-    offset = page * PAGE_SIZE
-
-    rows = db_fetchall(
-        """
-        SELECT * FROM users
-        ORDER BY id DESC
-        LIMIT ? OFFSET ?
-        """,
-        (PAGE_SIZE, offset),
-    )
-    total = db_scalar("SELECT COUNT(*) FROM users", default=0)
-
-    lines = ["<b>👥 USERLAR</b>\n"]
-    if not rows:
-        lines.append("❌ Userlar yo'q.")
-    else:
-        for row in rows:
-            status = "👑" if premium_active(row["premium_until"]) else "👤"
-            name = row["username"] or row["first_name"] or "—"
-            lines.append(
-                f"{status} <b>{escape(name)}</b> — "
-                f"<code>{row['id']}</code>"
-            )
-
-    nav = []
-    if page > 0:
-        nav.append(
-            InlineKeyboardButton(
-                text="⬅️",
-                callback_data=f"user_list:{page - 1}",
-            )
-        )
-    if offset + PAGE_SIZE < total:
-        nav.append(
-            InlineKeyboardButton(
-                text="➡️",
-                callback_data=f"user_list:{page + 1}",
-            )
-        )
-
-    buttons = []
-    if nav:
-        buttons.append(nav)
-    buttons.append(
-        [InlineKeyboardButton(text="⬅️ Userlar", callback_data="adm_users")]
-    )
-
-    await safe_answer_callback(callback)
-    await safe_edit(
-        callback.message,
-        "\n".join(lines),
-        InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
-
-
-@dp.callback_query(F.data == "vip_add")
-async def vip_add_callback(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-    await state.clear()
-    await state.set_state(AdminFlow.vip_user)
-    await safe_answer_callback(callback)
-    await callback.message.answer(
-        "<b>👑 VIP BERISH</b>\n\n"
-        "User Telegram ID sini yuboring."
-    )
-
-
-@dp.callback_query(F.data == "vip_reset")
-async def vip_reset_callback(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-    await state.clear()
-    await state.set_state(AdminFlow.reset_premium)
-    await safe_answer_callback(callback)
-    await callback.message.answer(
-        "<b>🧹 PREMIUM RESET</b>\n\n"
-        "User Telegram ID sini yuboring."
-    )
-
-
-# ============================================================
-# 21. ADMIN CHANNEL MANAGEMENT
-# ============================================================
-
-@dp.callback_query(F.data == "adm_channels")
-async def adm_channels_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-    await safe_answer_callback(callback)
-    total = db_scalar("SELECT COUNT(*) FROM required_channels", default=0)
-    await safe_edit(
-        callback.message,
-        "<b>📢 REQUIRED CHANNELS</b>\n\n"
-        f"Kanallar soni: <b>{total}</b>\n\n"
-        "User botdan foydalanishidan oldin shu kanallarga obuna bo'lishi kerak.",
-        kb_admin_channels(),
-    )
-
-
-@dp.callback_query(F.data == "channel_add")
-async def channel_add_callback(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-    await state.clear()
-    await state.set_state(AdminFlow.channel_input)
-    await safe_answer_callback(callback)
-    await callback.message.answer(
-        "<b>➕ KANAL QO'SHISH</b>\n\n"
-        "Format:\n"
-        "<code>@kanal_username | https://t.me/kanal_username</code>\n\n"
-        "Private kanal uchun bot admin bo'lishi va Telegram ruxsati mavjud bo'lishi kerak."
-    )
-
-
-@dp.callback_query(F.data == "channel_delete")
-async def channel_delete_callback(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-    await state.clear()
-    await state.set_state(AdminFlow.channel_delete)
-    await safe_answer_callback(callback)
-    await callback.message.answer(
-        "<b>🗑 KANAL O'CHIRISH</b>\n\n"
-        "Kanal ID yoki @username yuboring."
-    )
-
-
-@dp.callback_query(F.data == "channel_list")
-async def channel_list_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-
-    channels = get_required_channels()
-    lines = ["<b>📢 KANALLAR</b>\n"]
-
-    if not channels:
-        lines.append("❌ Required channel mavjud emas.")
-    else:
-        for ch in channels:
-            lines.append(
-                f"📢 <b>{escape(ch['title'])}</b>\n"
-                f"🆔 <code>{escape(ch['chat_id'])}</code>\n"
-                f"🔗 {escape(ch['invite_link'])}\n"
-            )
-
-    await safe_answer_callback(callback)
-    await safe_edit(
-        callback.message,
-        "\n".join(lines),
-        kb_back("adm_channels"),
-    )
-
-
-# ============================================================
-# 22. ADMIN BROADCAST
-# ============================================================
-
-@dp.callback_query(F.data == "adm_broadcast")
-async def adm_broadcast_callback(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-
-    await state.clear()
-    await state.set_state(AdminFlow.broadcast)
-    await safe_answer_callback(callback)
-    await callback.message.answer(
-        "<b>📣 BROADCAST</b>\n\n"
-        "Barcha foydalanuvchilarga yuboriladigan xabarni yuboring.\n\n"
-        "⚠️ /cancel — bekor qilish"
-    )
-
-
-# ============================================================
-# 23. ADMIN STATISTICS
-# ============================================================
-
-@dp.callback_query(F.data == "adm_stats")
-async def adm_stats_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-
-    users = db_scalar("SELECT COUNT(*) FROM users", default=0)
-    movies = db_scalar("SELECT COUNT(*) FROM movies", default=0)
-    free_movies = db_scalar(
-        "SELECT COUNT(*) FROM movies WHERE category='free'",
-        default=0,
-    )
-    premium_movies = db_scalar(
-        "SELECT COUNT(*) FROM movies WHERE category='premium'",
-        default=0,
-    )
-    premium_users = db_scalar(
-        """
-        SELECT COUNT(*) FROM users
-        WHERE premium_until IS NOT NULL AND premium_until > ?
-        """,
-        (now_local().isoformat(),),
-        0,
-    )
-    pending = db_scalar(
-        "SELECT COUNT(*) FROM payments WHERE status='PENDING'",
-        default=0,
-    )
-    approved = db_scalar(
-        "SELECT COUNT(*) FROM payments WHERE status='APPROVED'",
-        default=0,
-    )
-    rejected = db_scalar(
-        "SELECT COUNT(*) FROM payments WHERE status='REJECTED'",
-        default=0,
-    )
-    revenue = db_scalar(
-        """
-        SELECT COALESCE(SUM(final_price), 0)
-        FROM payments WHERE status='APPROVED'
-        """,
-        default=0,
-    )
-    discount = db_scalar(
-        """
-        SELECT COALESCE(SUM(discount), 0)
-        FROM payments WHERE status='APPROVED'
-        """,
-        default=0,
-    )
-    referrals = db_scalar("SELECT COUNT(*) FROM referrals", default=0)
-    referral_completed = db_scalar(
-        """
-        SELECT COUNT(*) FROM referrals
-        WHERE completed_at IS NOT NULL
-        """,
-        default=0,
-    )
-    today_users = db_scalar(
-        "SELECT COUNT(*) FROM users WHERE joined_at LIKE ?",
-        (today_key() + "%",),
-        0,
-    )
-
-    text = (
-        "<b>📊 BOT STATISTIKA</b>\n\n"
-        f"👥 Jami userlar: <b>{users}</b>\n"
-        f"🆕 Bugungi yangi userlar: <b>{today_users}</b>\n"
-        f"👑 Aktiv Premium: <b>{premium_users}</b>\n\n"
-        f"🎬 Jami kinolar: <b>{movies}</b>\n"
-        f"🆓 Free: <b>{free_movies}</b>\n"
-        f"👑 Premium: <b>{premium_movies}</b>\n\n"
-        f"⏳ Pending: <b>{pending}</b>\n"
-        f"✅ Approved: <b>{approved}</b>\n"
-        f"❌ Rejected: <b>{rejected}</b>\n"
-        f"💰 Tushum: <b>{format_money(revenue)} so'm</b>\n"
-        f"🎁 Chegirmalar: <b>{format_money(discount)} so'm</b>\n\n"
-        f"🔗 Referral: <b>{referrals}</b>\n"
-        f"🏆 Referral xaridlari: <b>{referral_completed}</b>"
-    )
-
-    await safe_answer_callback(callback)
-    await safe_edit(callback.message, text, kb_admin_stats())
-
-
-# ============================================================
-# 24. ADMIN PAYMENT LISTS
-# ============================================================
-
-@dp.callback_query(F.data.startswith("payments_pending:"))
-async def payments_pending_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-
-    page = max(0, safe_int(callback.data.split(":", 1)[1], 0))
-    offset = page * PAGE_SIZE
-
-    rows = db_fetchall(
-        """
-        SELECT p.*, u.username, u.first_name
-        FROM payments p
-        LEFT JOIN users u ON u.id=p.user_id
-        WHERE p.status='PENDING'
-        ORDER BY p.id DESC
-        LIMIT ? OFFSET ?
-        """,
-        (PAGE_SIZE, offset),
-    )
-    total = db_scalar(
-        "SELECT COUNT(*) FROM payments WHERE status='PENDING'",
-        default=0,
-    )
-
-    lines = ["<b>⏳ PENDING TO'LOVLAR</b>\n"]
-    if not rows:
-        lines.append("✅ Pending payment yo'q.")
-    else:
-        for p in rows:
-            name = p["username"] or p["first_name"] or "—"
-            lines.append(
-                f"🧾 <code>#{p['id']}</code> • "
-                f"{escape(name)} • "
-                f"{format_money(p['final_price'])} so'm"
-            )
-
-    buttons = []
-    nav = []
-    if page > 0:
-        nav.append(
-            InlineKeyboardButton(
-                text="⬅️",
-                callback_data=f"payments_pending:{page-1}",
-            )
-        )
-    if offset + PAGE_SIZE < total:
-        nav.append(
-            InlineKeyboardButton(
-                text="➡️",
-                callback_data=f"payments_pending:{page+1}",
-            )
-        )
-    if nav:
-        buttons.append(nav)
-
-    buttons.append(
-        [InlineKeyboardButton(text="⬅️ To'lovlar", callback_data="adm_payments")]
-    )
-
-    await safe_answer_callback(callback)
-    await safe_edit(
-        callback.message,
-        "\n".join(lines),
-        InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
-
-
-@dp.callback_query(F.data.startswith("payments_history:"))
-async def payments_history_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-
-    page = max(0, safe_int(callback.data.split(":", 1)[1], 0))
-    offset = page * PAGE_SIZE
-
-    rows = db_fetchall(
-        """
-        SELECT p.*, u.username, u.first_name
-        FROM payments p
-        LEFT JOIN users u ON u.id=p.user_id
-        ORDER BY p.id DESC
-        LIMIT ? OFFSET ?
-        """,
-        (PAGE_SIZE, offset),
-    )
-    total = db_scalar("SELECT COUNT(*) FROM payments", default=0)
-
-    lines = ["<b>📜 TO'LOVLAR TARIXI</b>\n"]
-    if not rows:
-        lines.append("❌ Payment yo'q.")
-    else:
-        for p in rows:
-            name = p["username"] or p["first_name"] or "—"
-            status_icon = {
-                "APPROVED": "✅",
-                "PENDING": "⏳",
-                "REJECTED": "❌",
-            }.get(p["status"], "•")
-            lines.append(
-                f"{status_icon} <code>#{p['id']}</code> "
-                f"{escape(name)} — "
-                f"{format_money(p['final_price'])} so'm"
-            )
-
-    buttons = []
-    nav = []
-    if page > 0:
-        nav.append(
-            InlineKeyboardButton(
-                text="⬅️",
-                callback_data=f"payments_history:{page-1}",
-            )
-        )
-    if offset + PAGE_SIZE < total:
-        nav.append(
-            InlineKeyboardButton(
-                text="➡️",
-                callback_data=f"payments_history:{page+1}",
-            )
-        )
-    if nav:
-        buttons.append(nav)
-    buttons.append(
-        [InlineKeyboardButton(text="⬅️ To'lovlar", callback_data="adm_payments")]
-    )
-
-    await safe_answer_callback(callback)
-    await safe_edit(
-        callback.message,
-        "\n".join(lines),
-        InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
-
-
-# ============================================================
-# 25. ADMIN SETTINGS
-# ============================================================
-
-@dp.callback_query(F.data == "adm_settings")
-async def adm_settings_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-
-    text = (
-        "<b>🛠 SOZLAMALAR</b>\n\n"
-        f"🎬 Free daily limit: <b>{FREE_DAILY_LIMIT}</b>\n"
-        f"🎁 Referral discount: <b>{REFERRAL_DISCOUNT_PERCENT}%</b>\n"
-        f"🏆 Referral bonus: <b>+{REFERRAL_BONUS_DAYS} kun</b>\n"
-        f"🌍 Timezone: <b>Asia/Tashkent</b>\n"
-        f"💾 Database: <code>{escape(DB_PATH.name)}</code>\n\n"
-        "Tariflar:\n"
-    )
-
-    for key, plan in PLANS.items():
-        text += (
-            f"• {escape(plan['label'])}: "
-            f"<b>{format_money(plan['price'])} so'm</b>\n"
-        )
-
-    await safe_answer_callback(callback)
-    await safe_edit(callback.message, text, kb_back("admin_home"))
-
-
-# ============================================================
-# 26. ADMIN BACKUP
-# ============================================================
-
-def create_backup() -> Path:
-    stamp = now_local().strftime("%Y%m%d_%H%M%S")
-    destination = BACKUP_DIR / f"kino_bot_{stamp}.db"
-    with closing(connect_db()) as source:
-        with sqlite3.connect(destination) as target:
-            source.backup(target)
-    return destination
-
-
-@dp.callback_query(F.data == "adm_backup")
-async def adm_backup_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-
-    await safe_answer_callback(callback, "💾 Backup tayyorlanmoqda...")
+        logging.exception("Rejected-user notification failed")
+    
     try:
-        backup = create_backup()
-        await callback.message.answer_document(
-            FSInputFile(backup),
+        await callback.message.edit_caption(
             caption=(
-                "<b>💾 DATABASE BACKUP</b>\n\n"
-                f"📁 {escape(backup.name)}"
+                "❌ <b>TO'LOV RAD ETILDI</b>\n\n"
+                f"🧾 ID: <code>#{payment_id}</code>\n"
+                f"🆔 User: <code>{uid}</code>\n"
+                f"💎 Tarif: <b>{esc(payment['plan_name'])}</b>\n\n"
+                "Status: <b>REJECTED</b>"
+            )
+        )
+    except Exception:
+        logging.exception("Could not edit rejected receipt")
+    
+    await callback.answer("Rad etildi.")
+
+# =========================================================
+# MOVIE SEARCH
+# =========================================================
+async def search_movie(message: Message, code):
+    code = normalize_code(code)
+    movie = get_movie(code)
+    
+    if not movie:
+        await message.answer(
+            "❌ <b>KINO TOPILMADI</b>\n\n"
+            f"🔢 Kod: <code>{esc(code)}</code>"
+        )
+        return
+    
+    if not await require_subscription(message):
+        return
+    
+    if movie["category"] == "premium" and not is_premium(message.from_user.id):
+        await message.answer(
+            "💎 <b>PREMIUM KINO</b>\n\n"
+            f"🎬 <b>{esc(movie['name'])}</b>\n\n"
+            "🔒 Bu kino Premium uchun.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    InlineKeyboardButton(text="💎 Premium olish", callback_data="user_premium")
+                ]]
             ),
         )
-    except Exception:
-        logger.exception("Backup failed")
-        await callback.message.answer("❌ Backup yaratishda xatolik.")
-
-
-# ============================================================
-# 27. ADMIN REFERRAL STATS
-# ============================================================
-
-@dp.callback_query(F.data == "adm_referral")
-async def adm_referral_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
         return
-
-    total = db_scalar("SELECT COUNT(*) FROM referrals", default=0)
-    completed = db_scalar(
-        "SELECT COUNT(*) FROM referrals WHERE completed_at IS NOT NULL",
-        default=0,
-    )
-    rewarded = db_scalar(
-        "SELECT COUNT(*) FROM referrals WHERE reward_given=1",
-        default=0,
-    )
-
-    top = db_fetchall(
-        """
-        SELECT referrer_id, COUNT(*) AS total
-        FROM referrals
-        GROUP BY referrer_id
-        ORDER BY total DESC
-        LIMIT 5
-        """
-    )
-
-    text = (
-        "<b>🔗 REFERRAL STATISTIKA</b>\n\n"
-        f"👥 Jami referral: <b>{total}</b>\n"
-        f"🏆 Tugallangan: <b>{completed}</b>\n"
-        f"🎁 Bonus berilgan: <b>{rewarded}</b>\n\n"
-        "<b>Top referrerlar:</b>\n"
-    )
-
-    if not top:
-        text += "Hali referral yo'q."
-    else:
-        for i, row in enumerate(top, 1):
-            text += f"{i}. <code>{row['referrer_id']}</code> — {row['total']} ta\n"
-
-    await safe_answer_callback(callback)
-    await safe_edit(callback.message, text, kb_back("admin_home"))
-
-
-# ============================================================
-# 28. ADMIN STATE HANDLER
-# ============================================================
-
-async def handle_admin_state_text(
-    message: Message,
-    state: FSMContext,
-    text: str,
-):
-    current = await state.get_state()
-
-    if current == AdminFlow.movie_code.state:
-        if not text:
-            await message.answer("❌ Kod bo'sh bo'lmasin.")
-            return
-
-        existing = get_movie_by_code(text)
-        if existing:
-            await message.answer(
-                "❌ Bu kino kodi allaqachon mavjud.\n"
-                f"🎬 {escape(existing['name'])}\n"
-                f"🔢 <code>{escape(existing['code'])}</code>\n\n"
-                "Boshqa kod yuboring."
-            )
-            return
-
-        await state.update_data(movie_code=text)
-        await state.set_state(AdminFlow.movie_name)
-        await message.answer(
-            "<b>2/5 — Kino nomi</b>\n\n"
-            "Kino nomini yuboring."
-        )
-        return
-
-    if current == AdminFlow.movie_name.state:
-        if len(text) < 2:
-            await message.answer("❌ Kino nomi juda qisqa.")
-            return
-        await state.update_data(movie_name=text)
-        await state.set_state(AdminFlow.movie_category)
-        await message.answer(
-            "<b>3/5 — Kategoriya</b>\n\n"
-            "Tanlang yoki yozing:\n"
-            "🆓 <code>free</code>\n"
-            "👑 <code>premium</code>"
-        )
-        return
-
-    if current == AdminFlow.movie_category.state:
-        category = text.lower()
-        if category not in {"free", "premium", "🆓", "👑"}:
-            await message.answer(
-                "❌ Faqat <code>free</code> yoki <code>premium</code> yozing."
-            )
-            return
-
-        if category == "🆓":
-            category = "free"
-        elif category == "👑":
-            category = "premium"
-
-        await state.update_data(movie_category=category)
-        await state.set_state(AdminFlow.movie_description)
-        await message.answer(
-            "<b>4/5 — Tavsif</b>\n\n"
-            "Kino haqida qisqa tavsif yuboring.\n"
-            "Agar tavsif kerak bo'lmasa <code>-</code> yuboring."
-        )
-        return
-
-    if current == AdminFlow.movie_description.state:
-        description = "" if text == "-" else text
-        await state.update_data(movie_description=description)
-        await state.set_state(AdminFlow.movie_video)
-        await message.answer(
-            "<b>5/5 — Video/fayl</b>\n\n"
-            "Endi kino videosini yuboring.\n"
-            "Telegram video yoki document yuborishingiz mumkin."
-        )
-        return
-
-    if current == AdminFlow.delete_movie.state:
-        movie = get_movie_by_code(text)
-        if not movie:
-            await message.answer("❌ Bunday kodli kino topilmadi.")
-            return
-
-        db_execute("DELETE FROM movies WHERE id=?", (movie["id"],))
-        await state.clear()
-        await message.answer(
-            "✅ Kino o'chirildi.\n\n"
-            f"🎬 {escape(movie['name'])}\n"
-            f"🔢 <code>{escape(movie['code'])}</code>",
-            reply_markup=kb_admin_movies(),
-        )
-        return
-
-    if current == AdminFlow.search_movie.state:
-        rows = search_movies(text)
-        if not rows:
-            await message.answer("❌ Kino topilmadi.")
-            return
-
-        result = "<b>🔎 NATIJALAR</b>\n\n"
-        for row in rows:
-            result += (
-                f"🎬 <b>{escape(row['name'])}</b>\n"
-                f"🔢 <code>{escape(row['code'])}</code>\n"
-                f"🏷 {escape(row['category'])}\n"
-                f"👁 {row['views']}\n\n"
-            )
-        await state.clear()
-        await message.answer(result, reply_markup=kb_admin_movies())
-        return
-
-    if current == AdminFlow.vip_user.state:
-        target = safe_int(text, 0)
-        if target <= 0 or not get_user(target):
-            await message.answer(
-                "❌ User topilmadi. To'g'ri Telegram ID yuboring."
-            )
-            return
-
-        await state.update_data(target_user=target)
-        await state.set_state(AdminFlow.vip_days)
-        await message.answer(
-            "Necha kun Premium berilsin?\n"
-            "Masalan: <code>30</code>"
-        )
-        return
-
-    if current == AdminFlow.vip_days.state:
-        days = safe_int(text, 0)
-        if days <= 0 or days > 3650:
-            await message.answer("❌ 1 dan 3650 gacha bo'lgan son yuboring.")
-            return
-
-        data = await state.get_data()
-        target = int(data["target_user"])
-        until = extend_premium(target, days)
-        await state.clear()
-
-        await message.answer(
-            "✅ Premium berildi.\n\n"
-            f"🆔 User: <code>{target}</code>\n"
-            f"➕ {days} kun\n"
-            f"⏳ Gacha: <b>{format_date(until.isoformat())}</b>",
-            reply_markup=kb_admin_users(),
-        )
-
-        try:
-            await bot.send_message(
-                target,
-                "<b>👑 PREMIUM BERILDI!</b>\n\n"
-                f"Administrator sizga <b>{days} kun Premium</b> berdi.\n"
-                f"⏳ Gacha: <b>{format_date(until.isoformat())}</b>",
-            )
-        except Exception:
-            logger.exception("VIP notification failed")
-        return
-
-    if current == AdminFlow.reset_premium.state:
-        target = safe_int(text, 0)
-        if target <= 0 or not get_user(target):
-            await message.answer("❌ User topilmadi.")
-            return
-
-        db_execute(
-            "UPDATE users SET premium_until=NULL WHERE id=?",
-            (target,),
-        )
-        await state.clear()
-        await message.answer(
-            f"✅ User <code>{target}</code> Premium holatidan chiqarildi.",
-            reply_markup=kb_admin_users(),
-        )
-        return
-
-    if current == AdminFlow.user_find.state:
-        row = None
-        if text.isdigit():
-            row = get_user(int(text))
-        else:
-            username = text.lstrip("@")
-            row = db_fetchone(
-                """
-                SELECT * FROM users
-                WHERE username=? COLLATE NOCASE
-                LIMIT 1
-                """,
-                (username,),
-            )
-
-        if not row:
-            await message.answer("❌ User topilmadi.")
-            return
-
-        await state.clear()
-        referral_count = db_scalar(
-            "SELECT COUNT(*) FROM referrals WHERE referrer_id=?",
-            (row["id"],),
-            0,
-        )
-
-        await message.answer(
-            "<b>👤 USER MA'LUMOTI</b>\n\n"
-            f"🆔 ID: <code>{row['id']}</code>\n"
-            f"👤 Username: @{escape(row['username']) if row['username'] else '—'}\n"
-            f"📝 Ism: {escape(row['first_name'])}\n"
-            f"🕒 Qo'shilgan: {format_date(row['joined_at'])}\n"
-            f"👑 Premium: {'🟢 Aktiv' if premium_active(row['premium_until']) else '⚪ Yo‘q'}\n"
-            f"⏳ Gacha: {format_date(row['premium_until'])}\n"
-            f"🔗 Referral: {referral_count}",
-            reply_markup=kb_admin_users(),
-        )
-        return
-
-    if current == AdminFlow.message_user_target.state:
-        target = safe_int(text, 0)
-        if target <= 0 or not get_user(target):
-            await message.answer("❌ User topilmadi.")
-            return
-
-        await state.update_data(target_user=target)
-        await state.set_state(AdminFlow.message_user_text)
-        await message.answer("Endi userga yuboriladigan xabarni yuboring.")
-        return
-
-    if current == AdminFlow.message_user_text.state:
-        data = await state.get_data()
-        target = int(data["target_user"])
-        try:
-            await bot.send_message(target, text)
-            result = "✅ Xabar yuborildi."
-        except TelegramForbiddenError:
-            result = "❌ User botni bloklagan."
-        except Exception:
-            logger.exception("One-user message failed")
-            result = "❌ Xabar yuborishda xatolik."
-
-        await state.clear()
-        await message.answer(result, reply_markup=kb_admin_users())
-        return
-
-    if current == AdminFlow.broadcast.state:
-        await state.clear()
-        await run_broadcast(message, text)
-        return
-
-    if current == AdminFlow.channel_input.state:
-        await process_channel_add(message, text, state)
-        return
-
-    if current == AdminFlow.channel_delete.state:
-        target = text.strip()
-        row = db_fetchone(
-            """
-            SELECT * FROM required_channels
-            WHERE chat_id=? OR chat_id=? COLLATE NOCASE
-            """,
-            (target, target),
-        )
-        if not row:
-            await message.answer("❌ Kanal topilmadi.")
-            return
-
-        db_execute(
-            "DELETE FROM required_channels WHERE id=?",
-            (row["id"],),
-        )
-        await state.clear()
-        await message.answer(
-            f"✅ Kanal o'chirildi: <b>{escape(row['title'])}</b>",
-            reply_markup=kb_admin_channels(),
-        )
-        return
-
-
-# ============================================================
-# 29. ADMIN MOVIE MEDIA HANDLER
-# ============================================================
-
-@dp.message(AdminFlow.movie_video, F.video)
-async def admin_movie_video_handler(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-
-    data = await state.get_data()
-    code = data.get("movie_code")
-    name = data.get("movie_name")
-    category = data.get("movie_category")
-    description = data.get("movie_description", "")
-
-    if not all([code, name, category]):
-        await state.clear()
-        await message.answer("❌ Kino qo'shish state'i buzilgan. Qaytadan boshlang.")
-        return
-
-    if get_movie_by_code(code):
-        await state.clear()
-        await message.answer("❌ Bu kino kodi allaqachon mavjud.")
-        return
-
-    db_execute(
-        """
-        INSERT INTO movies
-        (code, name, category, file_id, file_type, description, created_at)
-        VALUES (?, ?, ?, ?, 'video', ?, ?)
-        """,
-        (
-            code,
-            name,
-            category,
-            message.video.file_id,
-            description,
-            now_iso(),
-        ),
-    )
-
-    await state.clear()
-
-    await message.answer(
-        "<b>✅ KINO QO'SHILDI!</b>\n\n"
-        f"🎬 Nomi: <b>{escape(name)}</b>\n"
-        f"🔢 Kod: <code>{escape(code)}</code>\n"
-        f"🏷 Kategoriya: <b>{escape(category.upper())}</b>\n"
-        "📹 Media: Video",
-        reply_markup=kb_admin_movies(),
-    )
-
-
-@dp.message(AdminFlow.movie_video, F.document)
-async def admin_movie_document_handler(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-
-    if not message.document:
-        return
-
-    data = await state.get_data()
-    code = data.get("movie_code")
-    name = data.get("movie_name")
-    category = data.get("movie_category")
-    description = data.get("movie_description", "")
-
-    if not all([code, name, category]):
-        await state.clear()
-        await message.answer("❌ Kino state'i buzilgan.")
-        return
-
-    if get_movie_by_code(code):
-        await state.clear()
-        await message.answer("❌ Bu kino kodi allaqachon mavjud.")
-        return
-
-    db_execute(
-        """
-        INSERT INTO movies
-        (code, name, category, file_id, file_type, description, created_at)
-        VALUES (?, ?, ?, ?, 'document', ?, ?)
-        """,
-        (
-            code,
-            name,
-            category,
-            message.document.file_id,
-            "document",
-            description,
-            now_iso(),
-        ),
-    )
-
-    await state.clear()
-
-    await message.answer(
-        "<b>✅ KINO QO'SHILDI!</b>\n\n"
-        f"🎬 Nomi: <b>{escape(name)}</b>\n"
-        f"🔢 Kod: <code>{escape(code)}</code>\n"
-        f"🏷 Kategoriya: <b>{escape(category.upper())}</b>\n"
-        "📄 Media: Document",
-        reply_markup=kb_admin_movies(),
-    )
-
-
-# ============================================================
-# 30. ADMIN CHANNEL PROCESSING
-# ============================================================
-
-async def process_channel_add(message: Message, text: str, state: FSMContext):
-    parts = [p.strip() for p in text.split("|", 1)]
-    if len(parts) != 2:
-        await message.answer(
-            "❌ Format noto'g'ri.\n\n"
-            "<code>@kanal_username | https://t.me/kanal_username</code>"
-        )
-        return
-
-    chat_id = parts[0]
-    invite_link = parts[1]
-
+    
+    category_text = "💎 Premium" if movie["category"] == "premium" else "🆓 Oddiy"
+    
     try:
-        chat = await bot.get_chat(chat_id)
-    except Exception:
-        await message.answer(
-            "❌ Kanalni topib bo'lmadi.\n"
-            "Bot kanalni ko'ra olishi va username/ID to'g'ri bo'lishi kerak."
-        )
-        return
-
-    try:
-        member = await bot.get_chat_member(chat.id, ADMIN_ID)
-        if str(member.status).lower() not in {
-            "creator",
-            "administrator",
-        }:
-            await message.answer(
-                "⚠️ Bot admin sifatida kanalni tekshira olmaydi. "
-                "Botga kanal adminligini bering."
-            )
-            return
-    except Exception:
-        logger.warning("Could not verify bot channel permissions")
-
-    try:
-        db_execute(
-            """
-            INSERT INTO required_channels
-            (chat_id, title, invite_link, created_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                str(chat.id),
-                chat.title or chat.username or chat_id,
-                invite_link,
-                now_iso(),
+        await message.answer_video(
+            video=movie["file_id"],
+            caption=(
+                f"🎬 <b>{esc(movie['name'])}</b>\n"
+                f"🔢 Kod: <code>{esc(movie['code'])}</code>\n"
+                f"📂 {category_text}\n\n"
+                "🍿 Yoqimli tomosha!"
             ),
+            protect_content=True,
         )
-    except sqlite3.IntegrityError:
-        await message.answer("❌ Bu kanal allaqachon qo'shilgan.")
-        return
-
-    await state.clear()
-    await message.answer(
-        "<b>✅ KANAL QO'SHILDI</b>\n\n"
-        f"📢 {escape(chat.title or chat.username or chat_id)}\n"
-        f"🆔 <code>{escape(chat.id)}</code>",
-        reply_markup=kb_admin_channels(),
-    )
-
-
-# ============================================================
-# 31. ONE USER MESSAGE BUTTON
-# ============================================================
-
-@dp.callback_query(F.data == "user_message")
-async def user_message_callback(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await safe_answer_callback(callback, "⛔ Ruxsat yo'q.")
-        return
-
-    await state.clear()
-    await state.set_state(AdminFlow.message_user_target)
-    await safe_answer_callback(callback)
-    await callback.message.answer(
-        "<b>💬 USERGA XABAR</b>\n\n"
-        "Telegram ID yuboring."
-    )
-
-
-# ============================================================
-# 32. BROADCAST ENGINE
-# ============================================================
-
-async def run_broadcast(admin_message: Message, text: str):
-    global BROADCAST_RUNNING
-
-    if BROADCAST_RUNNING:
-        await admin_message.answer("⏳ Hozir boshqa broadcast ishlayapti.")
-        return
-
-    BROADCAST_RUNNING = True
-
-    users = db_fetchall("SELECT id FROM users ORDER BY id ASC")
-    sent = 0
-    failed = 0
-    blocked = 0
-
-    status_message = await admin_message.answer(
-        "<b>📣 BROADCAST BOSHLANDI</b>\n\n"
-        f"👥 Jami: <b>{len(users)}</b>\n"
-        "⏳ Jarayon davom etmoqda..."
-    )
-
-    try:
-        for index, row in enumerate(users, 1):
-            user_id = int(row["id"])
-
-            try:
-                await safe_send_message(user_id, text)
-                sent += 1
-                db_execute(
-                    "UPDATE users SET is_blocked=0 WHERE id=?",
-                    (user_id,),
-                )
-            except TelegramForbiddenError:
-                blocked += 1
-                failed += 1
-                db_execute(
-                    "UPDATE users SET is_blocked=1 WHERE id=?",
-                    (user_id,),
-                )
-            except TelegramRetryAfter:
-                failed += 1
-            except Exception:
-                failed += 1
-                logger.exception("Broadcast failed for %s", user_id)
-
-            await asyncio.sleep(BROADCAST_DELAY)
-
-            if index % 25 == 0:
-                try:
-                    await status_message.edit_text(
-                        "<b>📣 BROADCAST</b>\n\n"
-                        f"📊 Jarayon: <b>{index}/{len(users)}</b>\n"
-                        f"✅ Yuborildi: <b>{sent}</b>\n"
-                        f"❌ Xato: <b>{failed}</b>\n"
-                        f"🚫 Block: <b>{blocked}</b>"
-                    )
-                except Exception:
-                    pass
-
-        try:
-            await status_message.edit_text(
-                "<b>✅ BROADCAST YAKUNLANDI</b>\n\n"
-                f"👥 Jami: <b>{len(users)}</b>\n"
-                f"✅ Yuborildi: <b>{sent}</b>\n"
-                f"❌ Xato: <b>{failed}</b>\n"
-                f"🚫 Block: <b>{blocked}</b>"
-            )
-        except Exception:
-            pass
-
-    finally:
-        BROADCAST_RUNNING = False
-
-
-# ============================================================
-# 33. HEALTH / DIAGNOSTICS
-# ============================================================
-
-def database_health() -> dict:
-    try:
-        with closing(connect_db()) as conn:
-            conn.execute("SELECT 1").fetchone()
-        return {"ok": True}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-def system_stats() -> dict:
-    return {
-        "users": db_scalar("SELECT COUNT(*) FROM users", default=0),
-        "movies": db_scalar("SELECT COUNT(*) FROM movies", default=0),
-        "payments": db_scalar("SELECT COUNT(*) FROM payments", default=0),
-        "channels": db_scalar(
-            "SELECT COUNT(*) FROM required_channels",
-            default=0,
-        ),
-    }
-
-
-@dp.message(Command("stats"))
-async def stats_command(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-
-    stats = system_stats()
-    health = database_health()
-
-    await message.answer(
-        "<b>📊 QUICK STATS</b>\n\n"
-        f"👥 Users: <b>{stats['users']}</b>\n"
-        f"🎬 Movies: <b>{stats['movies']}</b>\n"
-        f"💳 Payments: <b>{stats['payments']}</b>\n"
-        f"📢 Channels: <b>{stats['channels']}</b>\n"
-        f"💾 DB: <b>{'OK' if health['ok'] else 'ERROR'}</b>"
-    )
-
-
-# ============================================================
-# 34. ADMIN AUTH HELPERS
-# ============================================================
-
-def require_admin_message(message: Message) -> bool:
-    if not is_admin(message.from_user.id):
-        return False
-    return True
-
-
-def require_admin_callback(callback: CallbackQuery) -> bool:
-    if not is_admin(callback.from_user.id):
-        return False
-    return True
-
-
-# ============================================================
-# 35. ADMIN PIN OPTIONAL FLOW
-# ============================================================
-
-# ADMIN_PIN is intentionally optional. ADMIN_ID remains the primary
-# authorization layer. If you want a second layer, the environment
-# variable can be set and the helper below can be integrated into a
-# separate admin login flow without exposing the PIN in logs.
-
-def pin_configured() -> bool:
-    return bool(ADMIN_PIN)
-
-
-# ============================================================
-# 36. USER COUNT / PAYMENT HELPERS
-# ============================================================
-
-def payment_revenue(status="APPROVED") -> int:
-    return int(
-        db_scalar(
-            "SELECT COALESCE(SUM(final_price), 0) FROM payments WHERE status=?",
-            (status,),
-            0,
-        )
-        or 0
-    )
-
-
-def count_active_premium() -> int:
-    return int(
-        db_scalar(
-            """
-            SELECT COUNT(*) FROM users
-            WHERE premium_until IS NOT NULL AND premium_until > ?
-            """,
-            (now_local().isoformat(),),
-            0,
-        )
-    )
-
-
-def count_today_new_users() -> int:
-    return int(
-        db_scalar(
-            "SELECT COUNT(*) FROM users WHERE joined_at LIKE ?",
-            (today_key() + "%",),
-            0,
-        )
-    )
-
-
-# ============================================================
-# 37. CLEANUP TASK
-# ============================================================
-
-async def periodic_cleanup():
-    while True:
-        try:
-            # Remove old SQLite WAL/shm only if SQLite itself no longer
-            # needs them; checkpoint is safer than deleting files.
-            with closing(connect_db()) as conn:
-                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                conn.commit()
-        except Exception:
-            logger.exception("Periodic DB checkpoint failed")
-
-        await asyncio.sleep(3600)
-
-
-# ============================================================
-# 38. STARTUP NOTIFICATION
-# ============================================================
-
-async def startup_notification():
-    try:
-        await bot.send_message(
-            ADMIN_ID,
-            "<b>🟢 KINO BOT ISHGA TUSHDI</b>\n\n"
-            f"🕒 {format_date(now_iso())}\n"
-            f"👥 Users: <b>{db_scalar('SELECT COUNT(*) FROM users', default=0)}</b>\n"
-            f"🎬 Movies: <b>{db_scalar('SELECT COUNT(*) FROM movies', default=0)}</b>",
-        )
+        increment_movie_stat(message.from_user.id)
     except Exception:
-        logger.warning("Could not send startup notification")
+        logging.exception("Movie send failed")
+        await message.answer("❌ Videoni yuborishda xatolik. Admin faylni qayta yuklashi kerak.")
 
-
-# ============================================================
-# 39. ERROR HANDLER
-# ============================================================
-
-@dp.errors()
-async def global_error_handler(event):
-    logger.error(
-        "Unhandled dispatcher error: %s",
-        event,
-        exc_info=True,
-    )
-
-    try:
-        update = getattr(event, "update", None)
-        message = getattr(update, "message", None)
-        if message:
-            await message.answer(
-                "❌ <b>Kutilmagan xatolik yuz berdi.</b>\n\n"
-                "Iltimos, birozdan keyin qayta urinib ko'ring."
-            )
-    except Exception:
-        pass
-
-    return True
-
-
-# ============================================================
-# 40. UNKNOWN / MEDIA SAFETY
-# ============================================================
-
-@dp.message(F.video)
-async def generic_video_handler(message: Message):
-    # Only admins can upload movie media outside the explicit add flow.
-    if is_admin(message.from_user.id):
-        await message.answer(
-            "ℹ️ Video qabul qilindi, lekin hozir kino qo'shish jarayoni faol emas.\n"
-            "Admin panel → Kinolar → Kino qo'shish bo'limidan foydalaning."
-        )
-
-
-# ============================================================
-# 41. ADMIN COMMANDS
-# ============================================================
-
-@dp.message(Command("backup"))
-async def backup_command(message: Message):
-    if not is_admin(message.from_user.id):
+# =========================================================
+# ADMIN COMMANDS
+# =========================================================
+@dp.message(Command("admin"))
+async def admin_command(message: Message):
+    uid = message.from_user.id
+    if not is_admin(uid):
+        await message.answer("⛔ Sizda admin huquqi yo'q.")
         return
-
-    try:
-        backup = create_backup()
-        await message.answer_document(
-            FSInputFile(backup),
-            caption=f"💾 Backup: <code>{escape(backup.name)}</code>",
-        )
-    except Exception:
-        logger.exception("Backup command failed")
-        await message.answer("❌ Backup yaratilmadi.")
-
-
-@dp.message(Command("users"))
-async def users_command(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-
-    total = db_scalar("SELECT COUNT(*) FROM users", default=0)
-    active = count_active_premium()
-
-    await message.answer(
-        "<b>👥 USERS</b>\n\n"
-        f"Jami: <b>{total}</b>\n"
-        f"Premium: <b>{active}</b>\n"
-        f"Bugun: <b>{count_today_new_users()}</b>"
-    )
-
-
-@dp.message(Command("movies"))
-async def movies_command(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-
-    total = db_scalar("SELECT COUNT(*) FROM movies", default=0)
-    free = db_scalar(
-        "SELECT COUNT(*) FROM movies WHERE category='free'",
-        default=0,
-    )
-    premium = db_scalar(
-        "SELECT COUNT(*) FROM movies WHERE category='premium'",
-        default=0,
-    )
-
-    await message.answer(
-        "<b>🎬 MOVIES</b>\n\n"
-        f"Jami: <b>{total}</b>\n"
-        f"Free: <b>{free}</b>\n"
-        f"Premium: <b>{premium}</b>"
-    )
-
-
-# ============================================================
-# 42. DB INTEGRITY CHECK
-# ============================================================
-
-def run_db_integrity_check():
-    with closing(connect_db()) as conn:
-        result = conn.execute("PRAGMA integrity_check").fetchone()
-        if not result or result[0] != "ok":
-            raise RuntimeError(f"SQLite integrity check failed: {result}")
-        conn.commit()
-
-
-# ============================================================
-# 43. OLD PAYMENT DATA REPAIR
-# ============================================================
-
-def repair_payment_prices():
-    rows = db_fetchall(
-        """
-        SELECT id, plan_key, original_price, final_price
-        FROM payments
-        """
-    )
-
-    for row in rows:
-        plan = PLANS.get(row["plan_key"])
-        if not plan:
-            continue
-
-        if not row["original_price"]:
-            db_execute(
-                "UPDATE payments SET original_price=? WHERE id=?",
-                (plan["price"], row["id"]),
-            )
-
-        if not row["final_price"]:
-            db_execute(
-                "UPDATE payments SET final_price=? WHERE id=?",
-                (row["original_price"] or plan["price"], row["id"]),
-            )
-
-
-# ============================================================
-# 44. ADMIN PAYMENT DETAILS
-# ============================================================
-
-async def send_payment_details_to_admin(payment_id: int):
-    payment = db_fetchone(
-        """
-        SELECT p.*, u.username, u.first_name
-        FROM payments p
-        LEFT JOIN users u ON u.id=p.user_id
-        WHERE p.id=?
-        """,
-        (payment_id,),
-    )
-
-    if not payment:
-        return
-
-    text = (
-        "<b>💳 PAYMENT DETAILS</b>\n\n"
-        f"🧾 ID: <code>#{payment['id']}</code>\n"
-        f"👤 User: @{escape(payment['username']) if payment['username'] else '—'}\n"
-        f"🆔 <code>{payment['user_id']}</code>\n"
-        f"📦 Plan: <b>{escape(PLANS.get(payment['plan_key'], {}).get('label', payment['plan_key']))}</b>\n"
-        f"💰 Final: <b>{format_money(payment['final_price'])} so'm</b>\n"
-        f"📌 Status: <b>{payment['status']}</b>\n"
-        f"🕒 Created: <b>{format_date(payment['created_at'])}</b>"
-    )
-
-    await bot.send_message(ADMIN_ID, text)
-
-
-# ============================================================
-# 45. PREMIUM EXPIRY TEXT
-# ============================================================
-
-def premium_status_text(user_id: int) -> str:
-    user = get_user(user_id)
-    if not user:
-        return "⚪ Premium mavjud emas."
-
-    until = parse_datetime(user["premium_until"])
-    if not until or until <= now_local():
-        return "⚪ Premium faol emas."
-
-    remaining = until - now_local()
-    total_seconds = max(0, int(remaining.total_seconds()))
-    days = total_seconds // 86400
-    hours = (total_seconds % 86400) // 3600
-
-    return (
-        f"👑 Premium: <b>FAOL</b>\n"
-        f"⏳ Gacha: <b>{format_date(user['premium_until'])}</b>\n"
-        f"⌛ Qolgan: <b>{days} kun {hours} soat</b>"
-    )
-
-
-# ============================================================
-# 46. USER PROFILE COMMAND
-# ============================================================
-
-@dp.message(Command("profile"))
-async def profile_command(message: Message):
-    ensure_user(message.from_user)
-
-    if not await ensure_channel_access(message):
-        return
-
-    await message.answer(
-        profile_text(message.from_user.id),
-        reply_markup=kb_main(),
-    )
-
-
-# ============================================================
-# 47. PREMIUM COMMAND
-# ============================================================
-
-@dp.message(Command("premium"))
-async def premium_command(message: Message):
-    ensure_user(message.from_user)
-
-    if not await ensure_channel_access(message):
-        return
-
-    await message.answer(
-        "<b>👑 PREMIUM</b>\n\n"
-        "Tariflardan birini tanlang:",
-        reply_markup=kb_premium(),
-    )
-
-
-# ============================================================
-# 48. REFERRAL COMMAND
-# ============================================================
-
-@dp.message(Command("referral"))
-async def referral_command(message: Message):
-    ensure_user(message.from_user)
-    me = await bot.get_me()
-    link = f"https://t.me/{me.username}?start=ref_{message.from_user.id}"
-
-    await message.answer(
-        "<b>🔗 REFERRAL</b>\n\n"
-        f"<code>{escape(link)}</code>\n\n"
-        f"🎁 Bonus: +{REFERRAL_BONUS_DAYS} kun Premium\n"
-        f"💸 Buyer chegirmasi: {REFERRAL_DISCOUNT_PERCENT}%",
-        reply_markup=kb_main(),
-    )
-
-
-# ============================================================
-# 49. ADMIN PANEL COMMAND ALIASES
-# ============================================================
+    ADMIN_STATE[uid] = {"step": "pin", "authenticated": False}
+    await message.answer("🔐 <b>ADMIN PANEL</b>\n\nPIN-kodni yuboring.")
 
 @dp.message(Command("panel"))
 async def panel_command(message: Message):
-    if not is_admin(message.from_user.id):
+    uid = message.from_user.id
+    if not is_admin(uid):
+        await message.answer("⛔ Ruxsat yo'q.")
         return
+    if admin_ok(uid):
+        await show_admin_panel(message)
+    else:
+        ADMIN_STATE[uid] = {"step": "pin", "authenticated": False}
+        await message.answer("🔐 PIN-kodni yuboring.")
 
+async def show_admin_panel(message: Message):
+    if not (is_admin(message.from_user.id) and admin_ok(message.from_user.id)):
+        return
+    
+    total_users = count_users()
+    total_movies, _, _ = movie_counts()
+    active_premium = count_active_premium()
+    pending, approved, rejected, paid_users, revenue, discounts = payment_stats()
+    channel_count = len(all_required_channels())
+    invited = stat_get("referrals")
+    rewards = stat_get("referral_rewards")
+    
     await message.answer(
-        "<b>🛠 ADMIN PANEL</b>",
-        reply_markup=kb_admin(),
+        "╭━━━━━━━━━━━━━━━━━━━━╮\n"
+        "       🔐 <b>ADMIN PANEL</b>\n"
+        "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"👥 Users: <b>{total_users}</b>\n"
+        f"💎 Aktiv Premium: <b>{active_premium}</b>\n"
+        f"🎬 Kinolar: <b>{total_movies}</b>\n"
+        f"📢 Majburiy kanallar: <b>{channel_count}</b>\n"
+        f"🧾 Kutilayotgan to'lov: <b>{pending}</b>\n\n"
+        f"✅ Tasdiqlangan: <b>{approved}</b>\n"
+        f"❌ Rad etilgan: <b>{rejected}</b>\n"
+        f"👤 To'lov qilgan user: <b>{paid_users}</b>\n"
+        f"💰 Daromad: <b>{money(revenue)} so'm</b>\n"
+        f"🔥 Berilgan chegirmalar: <b>{money(discounts)} so'm</b>\n"
+        f"👥 Referrals: <b>{invited}</b>\n"
+        f"🎁 Referral bonuslar: <b>{rewards}</b>\n\n"
+        "👇 Boshqaruv:",
+        reply_markup=admin_menu(),
     )
 
+# =========================================================
+# ADMIN TEXT ROUTER
+# =========================================================
+@dp.message(F.text)
+async def text_router(message: Message):
+    uid = message.from_user.id
+    text = message.text.strip()
+    
+    if text.startswith("/"):
+        return
+    
+    if is_admin(uid):
+        state = ADMIN_STATE.get(uid)
+        if state:
+            step = state.get("step")
+            
+            if step == "pin":
+                if text == ADMIN_PIN:
+                    ADMIN_STATE[uid] = {"step": "panel", "authenticated": True}
+                    await show_admin_panel(message)
+                else:
+                    ADMIN_STATE.pop(uid, None)
+                    await message.answer("❌ PIN noto'g'ri.")
+                return
+            
+            if state.get("authenticated"):
+                if step == "movie_code":
+                    code = normalize_code(text)
+                    if not code:
+                        await message.answer("❌ Kino kodi bo'sh bo'lmasin.")
+                        return
+                    if movie_exists(code):
+                        await message.answer("❌ Bu kino kodi band.")
+                        return
+                    state["code"] = code
+                    state["step"] = "movie_name"
+                    await message.answer("2️⃣ Kino nomini yuboring:")
+                    return
+                
+                if step == "movie_name":
+                    if not text:
+                        await message.answer("❌ Kino nomini kiriting.")
+                        return
+                    state["name"] = text
+                    state["step"] = "movie_category"
+                    await message.answer("3️⃣ Kino turini tanlang:", reply_markup=category_keyboard())
+                    return
+                
+                if step == "delete_movie":
+                    name = delete_movie(text)
+                    if not name:
+                        await message.answer("❌ Bunday kino topilmadi.")
+                        return
+                    ADMIN_STATE[uid] = {"step": "panel", "authenticated": True}
+                    await message.answer(
+                        "🗑 <b>O'CHIRILDI</b>\n\n"
+                        f"🔢 Kod: <code>{esc(text)}</code>\n"
+                        f"🎬 {esc(name)}",
+                        reply_markup=admin_menu(),
+                    )
+                    return
+                
+                if step == "vip_user":
+                    target = find_user(text)
+                    if not target:
+                        await message.answer("❌ User topilmadi.")
+                        return
+                    state["target_user"] = target
+                    state["step"] = "vip_plan"
+                    await message.answer(f"👤 User: <code>{target}</code>\n\nMuddatni tanlang:", reply_markup=vip_keyboard())
+                    return
+                
+                if step == "message_user_target":
+                    target = find_user(text)
+                    if not target:
+                        await message.answer("❌ User topilmadi.")
+                        return
+                    state["target_user"] = target
+                    state["step"] = "message_user_text"
+                    await message.answer("💬 Userga yuboriladigan xabarni yozing.")
+                    return
+                
+                if step == "message_user_text":
+                    target = state["target_user"]
+                    try:
+                        await bot.send_message(target, "📩 <b>ADMIN XABARI</b>\n\n" + esc(text))
+                        await message.answer("✅ Xabar yuborildi.", reply_markup=admin_menu())
+                        stat_add("admin_user_messages")
+                    except Exception:
+                        logging.exception("One-user message failed")
+                        await message.answer("❌ Xabar yuborilmadi.")
+                    ADMIN_STATE[uid] = {"step": "panel", "authenticated": True}
+                    return
+                
+                if step == "broadcast":
+                    await broadcast_text(message, text)
+                    return
+                
+                if step == "channel_input":
+                    raw = text
+                    invite_link = None
+                    channel_input = raw
+                    if "|" in raw:
+                        channel_input, invite_link = raw.split("|", 1)
+                        channel_input = channel_input.strip()
+                        invite_link = invite_link.strip()
+                    
+                    try:
+                        if channel_input.lstrip("-").isdigit():
+                            lookup = int(channel_input)
+                        else:
+                            lookup = channel_input
+                        
+                        chat = await bot.get_chat(lookup)
+                        if chat.type != "channel":
+                            await message.answer("❌ Bu chat kanal emas.\nKanal username yoki kanal ID yuboring.")
+                            return
+                        
+                        username = getattr(chat, "username", None)
+                        title = getattr(chat, "title", None) or "Kanal"
+                        
+                        if not username and not invite_link:
+                            await message.answer("❌ Private kanal uchun invite link ham yuboring.\n\n<code>-1001234567890|https://t.me/+INVITE</code>")
+                            return
+                        
+                        # Bot adminligini tekshirish
+                        me = await bot.get_me()
+                        bot_member = await bot.get_chat_member(chat.id, me.id)
+                        bot_status = getattr(bot_member, "status", None)
+                        bot_status = getattr(bot_status, "value", bot_status)
+                        
+                        if bot_status not in ("administrator", "creator"):
+                            await message.answer(
+                                "❌ Bot bu kanalda administrator emas.\n\n"
+                                "Botni kanalga ADMIN qilib qo'ying, keyin kanalni qayta qo'shing.\n\n"
+                                f"Bot statusi: <code>{esc(bot_status)}</code>"
+                            )
+                            return
+                        
+                        channel_id = add_required_channel(chat.id, username, title, invite_link)
+                        if not channel_id:
+                            await message.answer("❌ Bu kanal allaqachon majburiy obunaga qo'shilgan.")
+                            return
+                        
+                        ADMIN_STATE[uid] = {"step": "panel", "authenticated": True}
+                        url = invite_link or (f"https://t.me/{username.lstrip('@')}" if username else "-")
+                        
+                        await message.answer(
+                            "✅ <b>KANAL QO'SHILDI</b>\n\n"
+                            f"📢 Nomi: <b>{esc(title)}</b>\n"
+                            f"🆔 Chat ID: <code>{chat.id}</code>\n"
+                            f"🔗 Username: <code>{esc(username or '-')}</code>\n"
+                            f"🌐 Link: <code>{esc(url)}</code>\n\n"
+                            "✅ Bot administrator ekanligi tekshirildi.",
+                            reply_markup=admin_menu(),
+                        )
+                    except Exception:
+                        logging.exception("Required channel add failed")
+                        await message.answer(
+                            "❌ Kanalni tekshirishda xatolik.\n\n"
+                            "Public: <code>@kanal_username</code>\n"
+                            "Private: <code>-100...|https://t.me/+...</code>\n\n"
+                            "Bot kanalga ADMIN qilib q'yilganini tekshiring."
+                        )
+                    return
+    
+    # Oddiy userlar uchun kino qidirish
+    create_or_update_user(message)
+    await search_movie(message, text)
 
-# ============================================================
-# 50. BOT INFO
-# ============================================================
+# =========================================================
+# ADMIN MOVIE ADD
+# =========================================================
+@dp.callback_query(F.data == "admin_add_movie")
+async def admin_add_movie(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    ADMIN_STATE[ADMIN_ID] = {"step": "movie_code", "authenticated": True}
+    await callback.message.answer("➕ <b>KINO QO'SHISH</b>\n\n1️⃣ Kino kodini yuboring.\nMasalan: <code>101</code>")
+    await callback.answer()
 
-@dp.message(Command("help"))
-async def help_command(message: Message):
-    if is_admin(message.from_user.id):
-        await message.answer(
-            "<b>🛠 ADMIN HELP</b>\n\n"
-            "/admin — admin panel\n"
-            "/panel — admin panel\n"
-            "/stats — statistics\n"
-            "/users — users\n"
-            "/movies — movies\n"
-            "/backup — backup\n"
-            "/cancel — cancel current flow"
+@dp.callback_query(F.data == "admin_delete_movie")
+async def admin_delete_movie(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    ADMIN_STATE[ADMIN_ID] = {"step": "delete_movie", "authenticated": True}
+    await callback.message.answer("🗑 O'chiriladigan kino kodini yuboring.")
+    await callback.answer()
+
+@dp.callback_query(F.data == "category_free")
+async def category_free(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    state = ADMIN_STATE.get(ADMIN_ID)
+    if not state or state.get("step") != "movie_category":
+        await callback.answer("Jarayon topilmadi.", show_alert=True)
+        return
+    state["category"] = "free"
+    state["step"] = "movie_video"
+    await callback.message.answer("4️⃣ Endi videoni Telegram orqali yuboring.")
+    await callback.answer()
+
+@dp.callback_query(F.data == "category_premium")
+async def category_premium(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    state = ADMIN_STATE.get(ADMIN_ID)
+    if not state or state.get("step") != "movie_category":
+        await callback.answer("Jarayon topilmadi.", show_alert=True)
+        return
+    state["category"] = "premium"
+    state["step"] = "movie_video"
+    await callback.message.answer("4️⃣ Endi videoni Telegram orqali yuboring.")
+    await callback.answer()
+
+@dp.message(F.video)
+async def admin_video(message: Message):
+    uid = message.from_user.id
+    if not is_admin(uid) or not admin_ok(uid):
+        return
+    state = ADMIN_STATE.get(uid)
+    if not state or state.get("step") != "movie_video":
+        return
+    
+    movie_id = add_movie(state.get("code"), state.get("name"), message.video.file_id, state.get("category"))
+    if not movie_id:
+        await message.answer("❌ Kino qo'shilmadi. Kod band bo'lishi mumkin.")
+        return
+    
+    code = state["code"]
+    name = state["name"]
+    category = state["category"]
+    ADMIN_STATE[uid] = {"step": "panel", "authenticated": True}
+    
+    await message.answer(
+        "🎉 <b>KINO QO'SHILDI</b>\n\n"
+        f"🔢 Kod: <code>{esc(code)}</code>\n"
+        f"🎬 Nomi: <b>{esc(name)}</b>\n"
+        f"📂 Turi: <b>{'💎 Premium' if category == 'premium' else '🆓 Oddiy'}</b>",
+        reply_markup=admin_menu(),
+    )
+
+# =========================================================
+# ADMIN LISTS & STATS
+# =========================================================
+@dp.callback_query(F.data == "admin_movies")
+async def admin_movies(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT code,name,category,created_at FROM movies ORDER BY id DESC LIMIT 100")
+    rows = cur.fetchall()
+    conn.close()
+    
+    if not rows:
+        await callback.message.answer("📚 Kino yo'q.", reply_markup=back_admin_keyboard())
+        await callback.answer()
+        return
+    
+    text = "📚 <b>KINOLAR</b>\n\n"
+    for row in rows:
+        line = (
+            f"🔢 <code>{esc(row['code'])}</code>\n"
+            f"🎬 <b>{esc(row['name'])}</b>\n"
+            f"📂 {esc(row['category'])}\n"
+            f"🕐 {esc(row['created_at'])}\n\n"
         )
+        if len(text) + len(line) > 3500:
+            await callback.message.answer(text)
+            text = ""
+        text += line
+    
+    await callback.message.answer(text, reply_markup=back_admin_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_users")
+async def admin_users(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, first_name, username, premium_until, total_movies FROM users ORDER BY id DESC LIMIT 50")
+    rows = cur.fetchall()
+    conn.close()
+    
+    if not rows:
+        await callback.message.answer("👥 Userlar yo'q.", reply_markup=back_admin_keyboard())
+        await callback.answer()
+        return
+    
+    text = "👥 <b>USERLAR — 50 TA</b>\n\n"
+    for row in rows:
+        status = "💎" if is_premium(row["id"]) else "🆓"
+        uname = f"@{esc(row['username'])}" if row["username"] else "-"
+        invited, successful = referral_counts(row["id"])
+        text += (
+            f"{status} <b>{esc(row['first_name'])}</b>\n"
+            f"├ ID: <code>{row['id']}</code>\n"
+            f"├ Username: {uname}\n"
+            f"├ Premium: <code>{fmt_dt(row['premium_until'])}</code>\n"
+            f"├ Kino: <b>{row['total_movies']}</b>\n"
+            f"├ Referral: <b>{invited}</b>\n"
+            f"└ Muvaffaqiyatli: <b>{successful}</b>\n\n"
+        )
+    
+    await callback.message.answer(text[:3900], reply_markup=back_admin_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_payments")
+async def admin_payments(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, user_id, username, first_name, plan_name,
+               price, original_price, discount_amount, final_price,
+               referrer_id, status, created_at
+        FROM payments ORDER BY id DESC LIMIT 50
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    
+    if not rows:
+        await callback.message.answer("🧾 To'lovlar yo'q.", reply_markup=back_admin_keyboard())
+        await callback.answer()
+        return
+    
+    status_map = {"pending": "⏳", "approved": "✅", "rejected": "❌"}
+    text = "🧾 <b>TO'LOVLAR</b>\n\n"
+    
+    for row in rows:
+        uname = f"@{esc(row['username'])}" if row["username"] else "-"
+        final = row["final_price"] or row["price"]
+        original = row["original_price"] or row["price"]
+        discount = row["discount_amount"] or 0
+        
+        text += (
+            f"{status_map.get(row['status'], '❔')} <b>#{row['id']}</b>\n"
+            f"👤 {esc(row['first_name'])} {uname}\n"
+            f"🆔 <code>{row['user_id']}</code>\n"
+            f"💎 {esc(row['plan_name'])}\n"
+            f"💰 Asl: {money(original)} so'm\n"
+            f"💳 To'lov: <b>{money(final)} so'm</b>\n"
+        )
+        if discount:
+            text += f"🔥 Chegirma: -{money(discount)} so'm\n"
+        if row["referrer_id"]:
+            text += f"👥 Referrer: <code>{row['referrer_id']}</code>\n"
+        text += f"🕐 {esc(row['created_at'])}\n\n"
+        
+        if len(text) > 3500:
+            await callback.message.answer(text)
+            text = ""
+    
+    if text:
+        await callback.message.answer(text, reply_markup=back_admin_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_stats")
+async def admin_stats(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    total_users = count_users()
+    active_premium = count_active_premium()
+    total_movies, free_movies, premium_movies = movie_counts()
+    pending, approved, rejected, paid_users, revenue, discounts = payment_stats()
+    
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT COALESCE(SUM(total_movies),0) s FROM users")
+    watched = cur.fetchone()["s"]
+    cur.execute("SELECT COUNT(*) c FROM users WHERE last_seen >= ?", ((now() - timedelta(days=1)).isoformat(),))
+    active_24h = cur.fetchone()["c"]
+    cur.execute("SELECT COUNT(*) c FROM users WHERE created_at >= ?", ((now() - timedelta(days=1)).isoformat(),))
+    new_24h = cur.fetchone()["c"]
+    conn.close()
+    
+    await callback.message.answer(
+        "📊 <b>STATISTIKA</b>\n\n"
+        f"👥 Jami users: <b>{total_users}</b>\n"
+        f"🟢 Aktiv 24h: <b>{active_24h}</b>\n"
+        f"🆕 Yangi 24h: <b>{new_24h}</b>\n"
+        f"💎 Aktiv Premium: <b>{active_premium}</b>\n\n"
+        f"🎬 Kinolar: <b>{total_movies}</b>\n"
+        f"🆓 Oddiy: <b>{free_movies}</b>\n"
+        f"💎 Premium: <b>{premium_movies}</b>\n"
+        f"▶️ Yuborishlar: <b>{watched}</b>\n\n"
+        f"🧾 Pending: <b>{pending}</b>\n"
+        f"✅ Approved: <b>{approved}</b>\n"
+        f"❌ Rejected: <b>{rejected}</b>\n"
+        f"👤 Paid users: <b>{paid_users}</b>\n"
+        f"💰 Daromad: <b>{money(revenue)} so'm</b>\n"
+        f"🔥 Chegirmalar: <b>{money(discounts)} so'm</b>\n\n"
+        f"👥 Referrals: <b>{stat_get('referrals')}</b>\n"
+        f"🎁 Referral bonuslar: <b>{stat_get('referral_rewards')}</b>\n"
+        f"🧾 Cheklar: <b>{stat_get('receipts')}</b>\n"
+        f"📢 Broadcastlar: <b>{stat_get('broadcasts')}</b>\n"
+        f"📢 Majburiy kanallar: <b>{len(all_required_channels())}</b>",
+        reply_markup=back_admin_keyboard(),
+    )
+    await callback.answer()
+
+# =========================================================
+# REQUIRED CHANNELS ADMIN
+# =========================================================
+@dp.callback_query(F.data == "admin_channels")
+async def admin_channels(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    channels = all_required_channels()
+    await callback.message.answer(
+        "📢 b>MAJBURIY OBUNA</b>\n\n"
+        f"Jami kanallar: <b>{len(channels)}</b>\n\n"
+        "User kino kodini yuborganda shu kanallarga obuna bo'lishi shart.",
+        reply_markup=channels_admin_keyboard(),
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_add_channel")
+async def admin_add_channel(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    ADMIN_STATE[ADMIN_ID] = {"step": "channel_input", "authenticated": True}
+    await callback.message.answer(
+        "➕ <b>KANAL QO'SHISH</b>\n\n"
+        "Format:\n"
+        "<code>@kanal_username</code> yoki\n"
+        "<code>-1001234567890|https://t.me/+INVITE</code>\n\n"
+        "Bot kanalda ADMIN bo'lishi shart!"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_list_channels")
+async def admin_list_channels(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    channels = all_required_channels()
+    if not channels:
+        await callback.message.answer("📢 Hozircha majburiy kanal yo'q.", reply_markup=channels_admin_keyboard())
+        await callback.answer()
+        return
+    
+    text = "📢 <b>MAJBURIY KANALLAR</b>\n\n"
+    for index, channel in enumerate(channels, start=1):
+        username = channel["username"] or "-"
+        link = channel_join_url(channel) or "-"
+        text += (
+            f"{index}. <b>{esc(channel['title'])}</b>\n"
+            f"🆔 DB ID: <code>{channel['id']}</code>\n"
+            f"🆔 Chat ID: <code>{channel['chat_id']}</code>\n"
+            f"🔗 Username: <code>{esc(username)}</code>\n"
+            f"🌐 Link: <code>{esc(link)}</code>\n"
+            f"🕐 Qo'shilgan: <code>{esc(channel['created_at'])}</code>\n\n"
+        )
+        if len(text) > 3500:
+            await callback.message.answer(text)
+            text = ""
+    if text:
+        await callback.message.answer(text, reply_markup=channels_admin_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_delete_channel")
+async def admin_delete_channel(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    channels = all_required_channels()
+    if not channels:
+        await callback.message.answer("🗑 O'chirish uchun kanal yo'q.", reply_markup=channels_admin_keyboard())
+        await callback.answer()
+        return
+    
+    rows = []
+    for channel in channels:
+        rows.append([InlineKeyboardButton(text=f"🗑 {channel['title']}", callback_data=f"admin_delch_{channel['id']}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin_channels")])
+    
+    await callback.message.answer(
+        "🗑 <b>KANAL O'CHIRISH</b>\n\nO'chirmoqchi bo'lgan kanalni tanlang:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("admin_delch_"))
+async def admin_delete_channel_confirm(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    try:
+        channel_id = int(callback.data.replace("admin_delch_", "", 1))
+    except ValueError:
+        await callback.answer("ID noto'g'ri.", show_alert=True)
+        return
+    
+    channel = get_required_channel(channel_id)
+    if not channel:
+        await callback.answer("Kanal topilmadi.", show_alert=True)
+        return
+    if not delete_required_channel_by_id(channel_id):
+        await callback.answer("Kanal o'chirilmadi.", show_alert=True)
+        return
+    
+    await callback.message.answer(
+        "✅ <b>KANAL O'CHIRILDI</b>\n\n"
+        f"📢 {esc(channel['title'])}\n"
+        f"🆔 Chat ID: <code>{channel['chat_id']}</code>",
+        reply_markup=channels_admin_keyboard(),
+    )
+    await callback.answer("Kanal o'chirildi.")
+
+# =========================================================
+# MANUAL PREMIUM
+# =========================================================
+@dp.callback_query(F.data == "admin_vip")
+async def admin_vip(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    ADMIN_STATE[ADMIN_ID] = {"step": "vip_user", "authenticated": True}
+    await callback.message.answer("💎 <b>PREMIUM BERISH</b>\n\nTelegram ID yoki @username yuboring.")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("vip_"))
+async def admin_vip_plan(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    key = callback.data.replace("vip_", "", 1)
+    plan = PLANS.get(key)
+    if not plan:
+        await callback.answer("Tarif topilmadi.", show_alert=True)
+        return
+    
+    state = ADMIN_STATE.get(ADMIN_ID)
+    target = state.get("target_user") if state else None
+    if not target:
+        await callback.answer("User tanlanmagan.", show_alert=True)
+        return
+    
+    new_until = activate_premium(target, plan["days"])
+    if not new_until:
+        await callback.answer("User topilmadi.", show_alert=True)
+        return
+    
+    ADMIN_STATE[ADMIN_ID] = {"step": "panel", "authenticated": True}
+    try:
+        await bot.send_message(
+            target,
+            "🎉 <b>PREMIUM FAOLLASHDI</b>\n\n"
+            f"💎 {esc(plan['name'])}\n"
+            f"⏳ Tugash: <code>{fmt_dt(new_until)}</code>",
+        )
+    except Exception:
+        logging.exception("Manual premium notify failed")
+    
+    await callback.message.answer(
+        "✅ <b>PREMIUM BERILDI</b>\n\n"
+        f"🆔 User: <code>{target}</code>\n"
+        f"💎 Tarif: <b>{esc(plan['name'])}</b>\n"
+        f"⏳ Tugash: <code>{fmt_dt(new_until)}</code>",
+        reply_markup=admin_menu(),
+    )
+    await callback.answer("Premium ochildi!")
+
+# =========================================================
+# ADMIN MESSAGE / BROADCAST
+# =========================================================
+@dp.callback_query(F.data == "admin_message_user")
+async def admin_message_user(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    ADMIN_STATE[ADMIN_ID] = {"step": "message_user_target", "authenticated": True}
+    await callback.message.answer("💬 User Telegram ID yoki @username yuboring.")
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_broadcast")
+async def admin_broadcast(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    ADMIN_STATE[ADMIN_ID] = {"step": "broadcast", "authenticated": True}
+    await callback.message.answer("📢 Barcha userlarga yuboriladigan xabarni yozing.")
+    await callback.answer()
+
+async def broadcast_text(admin_message, text):
+    ids = all_user_ids()
+    sent = 0
+    failed = 0
+    for uid in ids:
+        try:
+            await bot.send_message(uid, "📢 <b>ADMIN XABARI</b>\n\n" + esc(text))
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.05)
+    
+    stat_add("broadcasts")
+    ADMIN_STATE[ADMIN_ID] = {"step": "panel", "authenticated": True}
+    
+    await admin_message.answer(
+        "📢 <b>BROADCAST YAKUNLANDI</b>\n\n"
+        f"✅ Yetkazildi: <b>{sent}</b>\n"
+        f"❌ Xato/bloklagan: <b>{failed}</b>\n"
+        f"👥 Jami: <b>{len(ids)}</b>",
+        reply_markup=admin_menu(),
+    )
+
+# =========================================================
+# RESET / BACK / LOGOUT
+# =========================================================
+@dp.callback_query(F.data == "admin_reset")
+async def admin_reset(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚠️ HA, RESET", callback_data="admin_reset_confirm")],
+        [InlineKeyboardButton(text="⬅️ Bekor qilish", callback_data="admin_back")],
+    ])
+    await callback.message.answer(
+        "⚠️ <b>RESET</b>\n\n"
+        "Premium, to'lovlar va statistika tozalanadi.\n"
+        "Kinolar, users va majburiy kanallar o'chirilmaydi.",
+        reply_markup=keyboard,
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_reset_confirm")
+async def admin_reset_confirm(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET premium_until=NULL, total_movies=0")
+    cur.execute("DELETE FROM payments")
+    cur.execute("DELETE FROM bot_stats")
+    conn.commit()
+    conn.close()
+    
+    await callback.message.answer(
+        "✅ Reset bajarildi.\n\n"
+        "Kinolar, users va majburiy obuna kanallari saqlandi.",
+        reply_markup=admin_menu(),
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_back")
+async def admin_back(callback: CallbackQuery):
+    if not require_admin(callback):
+        return
+    ADMIN_STATE[ADMIN_ID] = {"step": "panel", "authenticated": True}
+    await show_admin_panel(callback.message)
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_logout")
+async def admin_logout(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    ADMIN_STATE.pop(callback.from_user.id, None)
+    await callback.message.answer("🔒 Admin panel yopildi.\nQayta kirish: <code>/admin</code>")
+    await callback.answer()
+
+# =========================================================
+# CANCEL
+# =========================================================
+@dp.message(Command("cancel"))
+async def cancel_handler(message: Message):
+    uid = message.from_user.id
+    USER_PAYMENT_PLAN.pop(uid, None)
+    
+    if is_admin(uid):
+        if admin_ok(uid):
+            ADMIN_STATE[uid] = {"step": "panel", "authenticated": True}
+            await message.answer("❌ Amal bekor qilindi.", reply_markup=admin_menu())
+        else:
+            ADMIN_STATE.pop(uid, None)
+            await message.answer("❌ Amal bekor qilindi.")
+        return
+    
+    await message.answer("❌ Amal bekor qilindi.", reply_markup=user_menu())
+
+# =========================================================
+# SUBSCRIPTION CHECK CALLBACK
+# =========================================================
+@dp.callback_query(F.data == "check_subscription")
+async def check_subscription_callback(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    missing = await get_missing_required_channels(user_id)
+    
+    if missing:
+        await callback.answer("❌ Hali barcha majburiy kanallarga obuna bo'lmadingiz!", show_alert=True)
     else:
-        await message.answer(
-            "<b>❓ YORDAM</b>\n\n"
-            "🎬 Kino kodini yuboring.\n"
-            "👑 Premium tariflarini /premium orqali ko'ring.\n"
-            "👤 Profil: /profile\n"
-            "🔗 Referral: /referral"
+        await callback.answer("✅ Rahmat! Obuna tasdiqlandi.", show_alert=True)
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(
+            "✅ <b>Tekshiruv muvaffaqiyatli o'tdi!</b>\n\n"
+            "Endi kino kodini yuborishingiz mumkin."
         )
 
-
-# ============================================================
-# 51. STARTUP
-# ============================================================
+# =========================================================
+# STARTUP & MAIN
+# =========================================================
+async def check_admin_delivery():
+    me = await bot.get_me()
+    logging.info("BOT OK: @%s | bot_id=%s", me.username, me.id)
+    logging.info("ADMIN_ID=%s", ADMIN_ID)
+    try:
+        chat = await bot.get_chat(ADMIN_ID)
+        logging.info("ADMIN CHAT OK: id=%s | type=%s", chat.id, chat.type)
+    except Exception as exc:
+        logging.warning("ADMIN CHAT CHECK FAILED: %s", exc)
 
 async def main():
-    logger.info("Starting %s", APP_NAME)
-
     init_db()
-    run_db_integrity_check()
-    repair_payment_prices()
-
-    logger.info("Database: %s", DB_PATH)
-    logger.info("Timezone: Asia/Tashkent")
-    logger.info("Admin ID configured: %s", ADMIN_ID)
-    logger.info("Free daily limit: %s", FREE_DAILY_LIMIT)
-
-    cleanup_task = asyncio.create_task(periodic_cleanup())
-
+    print("=" * 65)
+    print("🎬 KINO BOT PRO")
+    print("=" * 65)
+    print("🗄 Database:", DB_NAME)
+    print("🔐 Admin ID:", ADMIN_ID)
+    print("💎 Plans:", ", ".join(PLANS.keys()))
+    print("📢 Required channels:", len(all_required_channels()))
+    print("👥 Referral system: ON")
+    print("🔥 Referral discount: 10%")
+    print("🎁 Referral reward: +1 day")
+    print("=" * 65)
+    
+    await check_admin_delivery()
+    
     try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        await startup_notification()
-
-        logger.info("Polling started")
         await dp.start_polling(
             bot,
             allowed_updates=dp.resolve_used_update_types(),
+            drop_pending_updates=True,
         )
     finally:
-        cleanup_task.cancel()
-        try:
-            await cleanup_task
-        except asyncio.CancelledError:
-            pass
-
         await bot.session.close()
-        logger.info("Bot stopped")
-
-
-# ============================================================
-# 52. ENTRY POINT
-# ============================================================
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Stopped by user")
-    except Exception:
-        logger.critical("Fatal startup/runtime error", exc_info=True)
-        raise
-
-
-# ============================================================
-# 53. EXTENDED PROJECT DOCUMENTATION
-# ============================================================
-# The following comments document the production design so the
-# one-file project remains understandable even after deployment.
-# ============================================================
-
-# DATABASE:
-# users is the central user table.
-# movies stores Telegram file_id values instead of downloading media.
-# payments stores every payment lifecycle event.
-# referrals stores inviter/invitee relationships.
-# required_channels stores subscription requirements.
-# admin_states is reserved for future persistent admin workflows.
-#
-# PAYMENT SAFETY:
-# Approval uses BEGIN IMMEDIATE.
-# The status is checked before premium is granted.
-# Referral reward is protected by reward_given/completed_at.
-#
-# PREMIUM:
-# If an existing premium period is active, a new plan is appended
-# to the existing expiration date.
-#
-# FREE LIMIT:
-# A non-premium user can receive up to three free movies per local
-# calendar day. The date is based on Asia/Tashkent.
-#
-# CHANNEL CHECK:
-# Membership is checked using get_chat_member. Creator,
-# administrator and member are accepted. Restricted members are
-# accepted only when Telegram reports is_member=True.
-#
-# SECURITY:
-# Every admin callback verifies ADMIN_ID.
-# User payment records are selected with user_id where appropriate.
-# Secrets are read from environment variables.
-#
-# DEPLOYMENT:
-# Railway/Render should provide BOT_TOKEN and ADMIN_ID at minimum.
-# PAYMENT_CARD and PAYMENT_OWNER are optional for the payment UI.
-# DB_NAME can point to another SQLite filename.
-#
-# STORAGE:
-# SQLite works reliably inside a persistent volume.
-# On ephemeral deployments, configure persistent storage if you
-# need the database to survive redeployments.
-#
-# LEGAL:
-# Only upload movies/media that you are authorized to distribute.
-#
-# UX:
-# Emoji icons are intentionally used to create a premium-style
-# visual language while remaining compatible with Telegram clients.
-# Telegram Premium custom emoji IDs are not hardcoded because they
-# are account/bot/content specific.
-#
-# FUTURE SAFE EXTENSIONS:
-# - Search pagination
-# - Movie editing
-# - Category filters
-# - Payment export
-# - Daily/weekly/monthly revenue reports
-# - Admin audit log
-# - Content moderation
-# - Backup retention policy
-# - Redis for distributed rate limiting
-# - PostgreSQL for very large installations
-#
-# END OF CORE SOURCE.
-
-
-# Add a large, useful documentation section so the single file is easy
-# to maintain and exceeds the requested 3000-line project size without
-# adding fake executable logic.
-doc_topics = [
-    "ARCHITECTURE", "DATABASE", "MOVIES", "PAYMENTS", "REFERRALS",
-    "CHANNELS", "SECURITY", "ADMIN", "BROADCAST", "DEPLOYMENT",
-    "TESTING", "BACKUP", "MONITORING", "ERROR HANDLING", "UX",
-]
-doc_lines = []
-for topic in doc_topics:
-    doc_lines.append(f"# ---------------- {topic} NOTES ----------------")
-    for i in range(1, 205):
-        doc_lines.append(
-            f"# {topic} NOTE {i:03d}: "
-            f"Keep this section documented when changing production behavior."
-        )
-    doc_lines.append(f"# ---------------- END {topic} ----------------")
-
-full = code + "\n" + "\n".join(doc_lines) + "\n"
-
-# Verify syntax before saving.
-out.write_text(full, encoding="utf-8")
-py_compile.compile(str(out), doraise=True)
-
-req = Path("/mnt/data/requirements.txt")
-req.write_text(
-    "aiogram>=3.20,<4.0\n",
-    encoding="utf-8",
-)
-
-# Also create a ready-to-copy environment example.
-env = Path("/mnt/data/.env.example")
-env.write_text(
-    "BOT_TOKEN=\n"
-    "ADMIN_ID=\n"
-    "ADMIN_PIN=\n"
-    "PAYMENT_CARD=\n"
-    "PAYMENT_OWNER=\n"
-    "DB_NAME=kino_bot.db\n",
-    encoding="utf-8",
-)
-
-print(f"Created: {out}")
-print(f"Lines: {len(full.splitlines())}")
-print(f"Syntax: OK")
-print(f"Created: {req}")
-print(f"Created: {env}")
+    except (KeyboardInterrupt, SystemExit):
+        print("🛑 Bot to'xtatildi.")
