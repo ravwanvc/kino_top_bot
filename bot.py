@@ -4,38 +4,6 @@ import textwrap, py_compile
 out = Path("/mnt/data/bot.py")
 
 
-# ============================================================
-# KINO BOT PRO — ONE FILE TELEGRAM BOT
-# Python 3.11+ / aiogram 3.x / SQLite
-# ============================================================
-# IMPORTANT:
-# This bot is designed for movies/videos that the administrator
-# owns, has permission to distribute, or is otherwise authorized
-# to provide. Do not use it to distribute copyrighted material
-# without the required rights.
-#
-# Main features:
-# - Premium-style dark Telegram UX with emoji icons
-# - Free daily movie limit
-# - Premium plans
-# - Receipt/photo/document payment flow
-# - Idempotent payment approval
-# - Referral links + 10% first-purchase discount + +1 day reward
-# - Required channel management
-# - Movie CRUD
-# - User management
-# - VIP/manual premium
-# - Broadcast
-# - Statistics
-# - Pagination
-# - FSM-like admin workflows using SQLite-backed state
-# - /cancel
-# - SQLite migrations
-# - Backup
-# - Error handling
-# - Railway/Render environment support
-# ============================================================
-
 import asyncio
 import html
 import logging
@@ -79,11 +47,11 @@ from aiogram.fsm.state import State, StatesGroup
 APP_NAME = "KINO BOT PRO"
 TIMEZONE = ZoneInfo("Asia/Tashkent")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-ADMIN_ID_RAW = os.getenv("ADMIN_ID", "").strip()
-ADMIN_PIN = os.getenv("ADMIN_PIN", "").strip()
-PAYMENT_CARD = os.getenv("PAYMENT_CARD", "").strip()
-PAYMENT_OWNER = os.getenv("PAYMENT_OWNER", "").strip()
+BOT_TOKEN = os.getenv("AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM", "AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM").strip()
+ADMIN_ID_RAW = os.getenv("8972505646", "8972505646").strip()
+ADMIN_PIN = os.getenv("jasur.2011", "jasur.2011").strip()
+PAYMENT_CARD = os.getenv("P5614 6812 8226 6067", "5614 6812 8226 6067").strip()
+PAYMENT_OWNER = os.getenv("K.M", "K.M").strip()
 DB_NAME = os.getenv("DB_NAME", "kino_bot.db").strip() or "kino_bot.db"
 
 FREE_DAILY_LIMIT = 3
