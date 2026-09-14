@@ -47,7 +47,7 @@ PAYMENT_CARD = os.getenv("5614 6812 8226 6067", "5614 6812 8226 6067").strip()
 PAYMENT_OWNER = os.getenv("K.M", "K.M").strip()
 
 try:
-    ADMIN_ID = int(os.getenv("8972505646", "0").strip())
+    ADMIN_ID = int(os.getenv("8972505646", "8972505646").strip())
 except ValueError:
     ADMIN_ID = 0
 
