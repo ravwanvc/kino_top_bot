@@ -2,6 +2,7 @@ import asyncio
 import html
 import logging
 import os
+import re
 import sqlite3
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -13,23 +14,14 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-# =========================================================
-# SOZLAMALAR (CONFIG)
-# =========================================================
-# MUHIM: Maxfiy ma'lumotlarni faqat environment variables dan o'qing!
-# Windows PowerShell:
-#   $env:BOT_TOKEN="YOUR_TOKEN"
-#   $env:ADMIN_ID="123456789"
-#   $env:ADMIN_PIN="YOUR_PIN"
-#   $env:PAYMENT_CARD="5614 6812 8226 6067"
-#   $env:PAYMENT_OWNER="K.M"
+
 
 BOT_TOKEN = os.getenv("8902562007:AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM", "8902562007:AAFN5vq84c6ntVSBtWfnTAiAJwZTVv5IimM").strip()
 
 try:
     ADMIN_ID = int(os.getenv("8972505646", "8972505646").strip())
-except ValueError:
-    ADMIN_ID = 8972505646
+except (TypeError, ValueError):
+    ADMIN_ID = 0
 
 ADMIN_PIN = os.getenv("jasur.2011", "jasur.2011").strip()
 PAYMENT_CARD = os.getenv("5614 6812 8226 6067", "5614 6812 8226 6067").strip()
@@ -53,7 +45,19 @@ logging.basicConfig(
 )
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN sozlanmagan!")
+    raise RuntimeError(
+        "BOT_TOKEN sozlanmagan. Environment Variables ga BOT_TOKEN kiriting."
+    )
+
+if ADMIN_ID <= 0:
+    raise RuntimeError(
+        "ADMIN_ID noto'g'ri. Environment Variables ga Telegram ID kiriting."
+    )
+
+if not ADMIN_PIN:
+    raise RuntimeError(
+        "ADMIN_PIN sozlanmagan. Environment Variables ga PIN kiriting."
+    )
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -124,10 +128,7 @@ def init_db():
             plan_name TEXT NOT NULL,
             price INTEGER NOT NULL,
             original_price INTEGER,
-            discount_amount INTEGER DEFAULT 0,
             final_price INTEGER,
-            referral_discount INTEGER DEFAULT 0,
-            referrer_id INTEGER,
             receipt_file_id TEXT NOT NULL,
             receipt_type TEXT DEFAULT 'photo',
             status TEXT NOT NULL DEFAULT 'pending',
@@ -135,7 +136,7 @@ def init_db():
             approved_at TEXT
         )
     """)
-    
+
     # Stats jadvali
     cur.execute("""
         CREATE TABLE IF NOT EXISTS bot_stats (
@@ -156,18 +157,6 @@ def init_db():
         )
     """)
     
-    # Referrals jadvali
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS referrals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            referrer_id INTEGER NOT NULL,
-            referred_id INTEGER NOT NULL UNIQUE,
-            status TEXT NOT NULL DEFAULT 'pending',
-            payment_id INTEGER,
-            created_at TEXT NOT NULL,
-            rewarded_at TEXT
-        )
-    """)
     
     conn.commit()
     conn.close()
@@ -175,18 +164,13 @@ def init_db():
     # Yangi ustunlarni qo'shish (migratsiya)
     ensure_column("payments", "approved_at", "TEXT")
     ensure_column("payments", "original_price", "INTEGER")
-    ensure_column("payments", "discount_amount", "INTEGER DEFAULT 0")
     ensure_column("payments", "final_price", "INTEGER")
-    ensure_column("payments", "referral_discount", "INTEGER DEFAULT 0")
-    ensure_column("payments", "referrer_id", "INTEGER")
     
     # Eski to'lovlarni yangilash
     conn = db()
     cur = conn.cursor()
     cur.execute("UPDATE payments SET original_price = price WHERE original_price IS NULL")
     cur.execute("UPDATE payments SET final_price = price WHERE final_price IS NULL")
-    cur.execute("UPDATE payments SET discount_amount = 0 WHERE discount_amount IS NULL")
-    cur.execute("UPDATE payments SET referral_discount = 0 WHERE referral_discount IS NULL")
     conn.commit()
     conn.close()
 
@@ -332,117 +316,6 @@ def count_active_premium():
     return result
 
 # =========================================================
-# REFERRALS
-# =========================================================
-def parse_referral_arg(message: Message):
-    text = (message.text or "").strip()
-    parts = text.split(maxsplit=1)
-    if len(parts) < 2:
-        return None
-    arg = parts[1].strip()
-    if not arg.startswith("ref_"):
-        return None
-    raw_id = arg[4:]
-    if not raw_id.isdigit():
-        return None
-    return int(raw_id)
-
-def create_referral(referrer_id, referred_id):
-    if referrer_id == referred_id:
-        return False
-    if not get_user(referrer_id):
-        return False
-    if not get_user(referred_id):
-        return False
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM referrals WHERE referred_id=?", (referred_id,))
-    if cur.fetchone():
-        conn.close()
-        return False
-    try:
-        cur.execute("""
-            INSERT INTO referrals(referrer_id, referred_id, status, created_at)
-            VALUES(?,?, 'pending', ?)
-        """, (referrer_id, referred_id, now_text()))
-        conn.commit()
-        conn.close()
-        stat_add("referrals")
-        return True
-    except sqlite3.IntegrityError:
-        conn.close()
-        return False
-
-def get_active_referral_for_user(referred_id):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT * FROM referrals
-        WHERE referred_id=? AND status='pending'
-        LIMIT 1
-    """, (referred_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-def referral_counts(referrer_id):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) c FROM referrals WHERE referrer_id=?", (referrer_id,))
-    total = cur.fetchone()["c"]
-    cur.execute("SELECT COUNT(*) c FROM referrals WHERE referrer_id=? AND status='completed'", (referrer_id,))
-    successful = cur.fetchone()["c"]
-    conn.close()
-    return total, successful
-
-def complete_referral(referred_id, payment_id):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT * FROM referrals
-        WHERE referred_id=? AND status='pending'
-        LIMIT 1
-    """, (referred_id,))
-    referral = cur.fetchone()
-    if not referral:
-        conn.close()
-        return None
-    cur.execute("""
-        UPDATE referrals
-        SET status='completed', payment_id=?, rewarded_at=?
-        WHERE id=? AND status='pending'
-    """, (payment_id, now_text(), referral["id"]))
-    changed = cur.rowcount
-    conn.commit()
-    conn.close()
-    return referral if changed == 1 else None
-
-def referral_price(user_id, plan_key):
-    plan = PLANS.get(plan_key)
-    if not plan:
-        return None, 0, None
-    referral = get_active_referral_for_user(user_id)
-    if not referral:
-        return plan["price"], 0, None
-    original = plan["price"]
-    final = (original * 90 + 50) // 100
-    discount = original - final
-    return final, discount, referral["referrer_id"]
-
-async def get_bot_username():
-    global BOT_USERNAME
-    if BOT_USERNAME:
-        return BOT_USERNAME
-    me = await bot.get_me()
-    BOT_USERNAME = me.username
-    return BOT_USERNAME
-
-async def referral_link(user_id):
-    username = await get_bot_username()
-    if not username:
-        return None
-    return f"https://t.me/{username}?start=ref_{user_id}"
-
 # =========================================================
 # PREMIUM
 # =========================================================
@@ -553,102 +426,268 @@ def increment_movie_stat(user_id):
     stat_add("movies_sent")
 
 # =========================================================
+# =========================================================
 # REQUIRED CHANNELS
 # =========================================================
+
 def all_required_channels():
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM required_channels ORDER BY id ASC")
+    cur.execute(
+        "SELECT * FROM required_channels ORDER BY id ASC"
+    )
     rows = cur.fetchall()
     conn.close()
     return rows
 
+
 def get_required_channel(channel_id):
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM required_channels WHERE id=?", (channel_id,))
+    cur.execute(
+        "SELECT * FROM required_channels WHERE id=?",
+        (channel_id,),
+    )
     row = cur.fetchone()
     conn.close()
     return row
 
-def add_required_channel(chat_id, username, title, invite_link=None):
+
+def add_required_channel(
+    chat_id,
+    username,
+    title,
+    invite_link=None,
+):
     conn = db()
     cur = conn.cursor()
+
     try:
-        cur.execute("""
-            INSERT INTO required_channels(chat_id, username, title, invite_link, created_at)
+        cur.execute(
+            """
+            INSERT INTO required_channels(
+                chat_id,
+                username,
+                title,
+                invite_link,
+                created_at
+            )
             VALUES(?,?,?,?,?)
-        """, (int(chat_id), username, title, invite_link, now_text()))
+            """,
+            (
+                int(chat_id),
+                username,
+                title,
+                invite_link,
+                now_text(),
+            ),
+        )
         row_id = cur.lastrowid
         conn.commit()
         conn.close()
         return row_id
+
     except sqlite3.IntegrityError:
         conn.close()
         return None
 
+
 def delete_required_channel_by_id(channel_id):
     conn = db()
     cur = conn.cursor()
-    cur.execute("DELETE FROM required_channels WHERE id=?", (channel_id,))
+
+    cur.execute(
+        "DELETE FROM required_channels WHERE id=?",
+        (channel_id,),
+    )
+
     changed = cur.rowcount
     conn.commit()
     conn.close()
+
     return changed == 1
+
 
 def channel_join_url(channel):
     if channel["invite_link"]:
         return channel["invite_link"]
+
     if channel["username"]:
-        return f"https://t.me/{str(channel['username']).lstrip('@')}"
+        return (
+            "https://t.me/"
+            + str(channel["username"]).lstrip("@")
+        )
+
     return None
 
+
+def normalize_channel_username(value):
+    """
+    Adminsiz rejimda faqat public kanal username qabul qilinadi.
+
+    Misollar:
+        @my_channel
+        my_channel
+        https://t.me/my_channel
+        https://telegram.me/my_channel
+    """
+    value = str(value or "").strip()
+
+    if not value:
+        return None
+
+    prefixes = (
+        "https://t.me/",
+        "http://t.me/",
+        "https://telegram.me/",
+        "http://telegram.me/",
+    )
+
+    if value.startswith("@"):
+        username = value[1:]
+
+    else:
+        username = value
+
+        for prefix in prefixes:
+            if value.startswith(prefix):
+                username = value[len(prefix):]
+                break
+
+    username = username.split("?", 1)[0]
+    username = username.split("/", 1)[0]
+    username = username.strip().lstrip("@")
+
+    if not re.fullmatch(
+        r"[A-Za-z0-9_]{5,64}",
+        username,
+    ):
+        return None
+
+    return f"@{username}"
+
+
 async def is_user_subscribed(channel, user_id):
+    """
+    Telegram Bot API orqali imkon qadar membership tekshiriladi.
+
+    MUHIM:
+    Telegram rasmiy Bot API hujjatiga ko'ra getChatMember boshqa
+    userlar uchun bot administrator bo'lgan holatda kafolatlanadi.
+    Shuning uchun bot-adminsiz rejimda API xatolik qaytarsa, user
+    xavfsizlik sababli obuna bo'lmagan deb hisoblanadi.
+    """
     try:
-        member = await bot.get_chat_member(chat_id=channel["chat_id"], user_id=user_id)
+        member = await bot.get_chat_member(
+            chat_id=channel["chat_id"],
+            user_id=user_id,
+        )
+
         status = getattr(member, "status", None)
-        status = getattr(status, "value", status)
-        if status in ("member", "administrator", "creator"):
+        status = getattr(
+            status,
+            "value",
+            status,
+        )
+
+        if status in (
+            "member",
+            "administrator",
+            "creator",
+        ):
             return True
+
         if status == "restricted":
-            return bool(getattr(member, "is_member", False))
-        return False
-    except Exception:
+            return bool(
+                getattr(
+                    member,
+                    "is_member",
+                    False,
+                )
+            )
+
         return False
 
+    except Exception as exc:
+        logging.warning(
+            "Subscription check unavailable: %s | %s",
+            channel["username"] or channel["chat_id"],
+            exc,
+        )
+        return False
+
+
 async def get_missing_required_channels(user_id):
-    # Agar bot kanalda admin bo'lmasa, tekshiruvdan o'tkazish (xavfsizlik)
     missing = []
+
     for channel in all_required_channels():
-        if not await is_user_subscribed(channel, user_id):
+        if not await is_user_subscribed(
+            channel,
+            user_id,
+        ):
             missing.append(channel)
+
     return missing
+
 
 def subscription_keyboard(channels):
     rows = []
+
     for channel in channels:
         url = channel_join_url(channel)
+
         if url:
-            rows.append([InlineKeyboardButton(text=f"📢 {channel['title']}", url=url)])
-    rows.append([InlineKeyboardButton(text="✅ Obunani tekshirish", callback_data="check_subscription")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"📢 {channel['title']}",
+                        url=url,
+                    )
+                ]
+            )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="✅ Obunani tekshirish",
+                callback_data="check_subscription",
+            )
+        ]
+    )
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=rows
+    )
+
 
 async def require_subscription(message: Message):
-    missing = await get_missing_required_channels(message.from_user.id)
+    channels = all_required_channels()
+
+    if not channels:
+        return True
+
+    missing = await get_missing_required_channels(
+        message.from_user.id
+    )
+
     if not missing:
         return True
-    text = (
-        "📢 <b>Xush kelibsiz!</b>\n\n"
-        "Botdan to'liq foydalanish va kinolarni ko'rish uchun "
-        "quyidagi kanallarimizga obuna bo'ling:\n\n"
-        "1️⃣ Pastdagi tugmalar orqali kanallarga kiring\n"
-        "2️⃣ <b>Obuna bo'ling</b>\n"
-        "3️⃣ <b>✅ Obunani tekshirish</b> tugmasini bosing."
+
+    await message.answer(
+        "📢 <b>MAJBURIY OBUNA</b>\n\n"
+        "Botdan foydalanishdan oldin quyidagi "
+        "kanallarga obuna bo'ling:\n\n"
+        "1️⃣ Kanal tugmasini bosing\n"
+        "2️⃣ Kanalga obuna bo'ling\n"
+        "3️⃣ <b>✅ Obunani tekshirish</b> tugmasini bosing.",
+        reply_markup=subscription_keyboard(
+            missing
+        ),
     )
-    await message.answer(text, reply_markup=subscription_keyboard(missing))
+
     return False
 
-# =========================================================
+
 # PAYMENTS
 # =========================================================
 def get_pending_payment_for_user(user_id):
@@ -663,31 +702,65 @@ def get_pending_payment_for_user(user_id):
     conn.close()
     return row
 
-def create_payment(user_id, username, first_name, plan_key, file_id, receipt_type):
+def create_payment(
+    user_id,
+    username,
+    first_name,
+    plan_key,
+    file_id,
+    receipt_type,
+):
     plan = PLANS.get(plan_key)
+
     if not plan:
         return None
-    final_price, discount, referrer_id = referral_price(user_id, plan_key)
+
+    price = int(plan["price"])
+
     conn = db()
     cur = conn.cursor()
-    cur.execute("""
+
+    cur.execute(
+        """
         INSERT INTO payments(
-            user_id, username, first_name, plan_key, plan_name,
-            price, original_price, discount_amount, final_price,
-            referral_discount, referrer_id, receipt_file_id, receipt_type,
-            status, created_at
+            user_id,
+            username,
+            first_name,
+            plan_key,
+            plan_name,
+            price,
+            original_price,
+            final_price,
+            receipt_file_id,
+            receipt_type,
+            status,
+            created_at
         )
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending', ?)
-    """, (
-        user_id, username, first_name, plan_key, plan["name"],
-        final_price, plan["price"], discount, final_price,
-        1 if referrer_id else 0, referrer_id, file_id, receipt_type, now_text()
-    ))
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            user_id,
+            username,
+            first_name,
+            plan_key,
+            plan["name"],
+            price,
+            price,
+            price,
+            file_id,
+            receipt_type,
+            "pending",
+            now_text(),
+        ),
+    )
+
     payment_id = cur.lastrowid
     conn.commit()
     conn.close()
+
     stat_add("receipts")
     return payment_id
+
 
 def get_payment(payment_id):
     conn = db()
@@ -737,20 +810,44 @@ def reject_payment(payment_id):
 def payment_stats():
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) c FROM payments WHERE status='pending'")
+
+    cur.execute(
+        "SELECT COUNT(*) c FROM payments WHERE status='pending'"
+    )
     pending = cur.fetchone()["c"]
-    cur.execute("SELECT COUNT(*) c FROM payments WHERE status='approved'")
+
+    cur.execute(
+        "SELECT COUNT(*) c FROM payments WHERE status='approved'"
+    )
     approved = cur.fetchone()["c"]
-    cur.execute("SELECT COUNT(*) c FROM payments WHERE status='rejected'")
+
+    cur.execute(
+        "SELECT COUNT(*) c FROM payments WHERE status='rejected'"
+    )
     rejected = cur.fetchone()["c"]
-    cur.execute("SELECT COUNT(DISTINCT user_id) c FROM payments WHERE status='approved'")
+
+    cur.execute(
+        "SELECT COUNT(DISTINCT user_id) c "
+        "FROM payments WHERE status='approved'"
+    )
     paid_users = cur.fetchone()["c"]
-    cur.execute("SELECT COALESCE(SUM(COALESCE(final_price, price)),0) s FROM payments WHERE status='approved'")
+
+    cur.execute(
+        "SELECT COALESCE(SUM(final_price),0) s "
+        "FROM payments WHERE status='approved'"
+    )
     revenue = cur.fetchone()["s"]
-    cur.execute("SELECT COALESCE(SUM(discount_amount),0) s FROM payments WHERE status='approved'")
-    discounts = cur.fetchone()["s"]
+
     conn.close()
-    return pending, approved, rejected, paid_users, revenue, discounts
+
+    return (
+        pending,
+        approved,
+        rejected,
+        paid_users,
+        revenue,
+    )
+
 
 # =========================================================
 # ADMIN AUTH
@@ -776,20 +873,27 @@ def user_menu():
             InlineKeyboardButton(text="💎 Premium", callback_data="user_premium"),
             InlineKeyboardButton(text="👤 Profil", callback_data="user_profile"),
         ],
-        [InlineKeyboardButton(text="👥 Do'st taklif qilish", callback_data="user_referral")],
     ])
 
-def premium_keyboard(user_id=None):
+def premium_keyboard():
     rows = []
+
     for key in ("1", "7", "10", "30", "365"):
         plan = PLANS[key]
-        final, discount, _ = referral_price(user_id, key) if user_id else (plan["price"], 0, None)
         emoji = "👑" if key == "365" else ("⭐" if key == "30" else "💎")
-        label = f"{emoji} {plan['days']} kun • {money(final)} so'm"
-        if discount:
-            label += " 🔥"
-        rows.append([InlineKeyboardButton(text=label, callback_data=f"plan_{key}")])
+        label = f"{emoji} {plan['days']} kun • {money(plan['price'])} so'm"
+
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"plan_{key}",
+                )
+            ]
+        )
+
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def category_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -889,12 +993,6 @@ async def send_home(message: Message):
 async def cmd_start(message: Message):
     create_or_update_user(message)
     
-    # Referral tekshirish
-    ref_id = parse_referral_arg(message)
-    if ref_id:
-        create_referral(referrer_id=ref_id, referred_id=message.from_user.id)
-    
-    # Majburiy obuna tekshiruvi
     if not await require_subscription(message):
         return
     
@@ -922,57 +1020,43 @@ async def user_search(callback: CallbackQuery):
 @dp.callback_query(F.data == "user_profile")
 async def user_profile(callback: CallbackQuery):
     user = get_user(callback.from_user.id)
+
     if not user:
         await callback.answer("Profil topilmadi.", show_alert=True)
         return
-    
+
     active = is_premium(callback.from_user.id)
     status = "💎 Premium" if active else "🆓 Free"
     until = fmt_dt(user["premium_until"]) if active else "-"
-    left = f"{premium_days_left(callback.from_user.id)} kun" if active else "0 kun"
-    invited, successful = referral_counts(callback.from_user.id)
-    
+    left = (
+        f"{premium_days_left(callback.from_user.id)} kun"
+        if active
+        else "0 kun"
+    )
+
     await callback.message.answer(
         "╭━━━━━━━━━━━━━━━━━━━━╮\n"
         "          👤 <b>PROFIL</b>\n"
         "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
         f"👤 Ism: <b>{esc(user['first_name'])}</b>\n"
-        f"🔗 Username: {('@' + esc(user['username'])) if user['username'] else 'Username yo‘q'}\n"
+        f"🔗 Username: "
+        f"{('@' + esc(user['username'])) if user['username'] else 'Username yo‘q'}\n"
         f"🆔 ID: <code>{user['id']}</code>\n\n"
         f"👑 Status: <b>{status}</b>\n"
         f"⏳ Tugash: <code>{until}</code>\n"
         f"📅 Qolgan: <b>{left}</b>\n"
         f"🎬 Kinolar: <b>{user['total_movies']}</b>\n"
-        f"👥 Taklif qilingan: <b>{invited}</b>\n"
-        f"🎁 Muvaffaqiyatli referral: <b>{successful}</b>\n"
         f"🕐 Oxirgi faollik: <code>{esc(user['last_seen'])}</code>\n"
-        f"📅 Ro'yxatdan o'tgan: <code>{esc(user['created_at'])}</code>"
+        f"📅 Ro‘yxatdan o'tgan: <code>{esc(user['created_at'])}</code>"
     )
+
     await callback.answer()
 
-@dp.callback_query(F.data == "user_referral")
-async def user_referral(callback: CallbackQuery):
-    uid = callback.from_user.id
-    link = await referral_link(uid)
-    total, successful = referral_counts(uid)
-    
-    await callback.message.answer(
-        "👥 <b>DO'ST TAKLIF QILISH</b>\n\n"
-        "Do'stingizni quyidagi havola orqali botga kiriting:\n\n"
-        f"<code>{esc(link or 'Link yaratilmadi')}</code>\n\n"
-        "🎁 <b>Bonus qoidasi:</b>\n"
-        "• Do'stingiz Premium sotib olsa, unga <b>10% chegirma</b> beriladi.\n"
-        "• To'lov admin tomonidan tasdiqlangandan keyin sizga <b>+1 kun Premium</b> beriladi.\n"
-        "• Bonus faqat haqiqiy referral va tasdiqlangan Premium to'lovi uchun beriladi.\n\n"
-        f"👥 Takliflar: <b>{total}</b>\n"
-        f"✅ Muvaffaqiyatli: <b>{successful}</b>",
-    )
-    await callback.answer()
 
 @dp.callback_query(F.data == "user_premium")
 async def user_premium(callback: CallbackQuery):
     uid = callback.from_user.id
-    
+
     if is_premium(uid):
         await callback.message.answer(
             "💎 <b>PREMIUM FAOL</b>\n\n"
@@ -981,97 +1065,112 @@ async def user_premium(callback: CallbackQuery):
         )
         await callback.answer()
         return
-    
-    has_referral = bool(get_active_referral_for_user(uid))
+
     text = (
         "╭━━━━━━━━━━━━━━━━━━━━╮\n"
         "       💎 <b>PREMIUM</b>\n"
         "╰━━━━━━━━━━━━━━━━━━━━╯\n\n"
-        "Tarifni tanlang:"
-    )
-    if has_referral:
-        text += "\n\n🔥 <b>Referral chegirmasi faol!</b>\nSizga Premium tariflarida <b>10% chegirma</b> beriladi."
-    text += (
-        "\n\n💳 <b>To'lov:</b>\n"
+        "Tarifni tanlang:\n\n"
+        "💳 <b>To'lov:</b>\n"
         f"<code>{esc(PAYMENT_CARD or 'Admin bilan bog‘laning')}</code>\n"
-        f"👤 {esc(PAYMENT_OWNER or '-')}\n\n"
+        f"👤 {esc(PAYMENT_OWNER or 'Admin')}\n\n"
         "1️⃣ Tarifni tanlang.\n"
         "2️⃣ To'lov qiling.\n"
         "3️⃣ Chekni shu botga yuboring.\n"
         "4️⃣ Admin tekshiradi.\n"
         "5️⃣ Tasdiqlangach Premium avtomatik ochiladi."
     )
-    await callback.message.answer(text, reply_markup=premium_keyboard(uid))
+
+    await callback.message.answer(
+        text,
+        reply_markup=premium_keyboard(),
+    )
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("plan_"))
 async def choose_plan(callback: CallbackQuery):
     uid = callback.from_user.id
     key = callback.data.replace("plan_", "", 1)
-    
+
     if key not in PLANS:
         await callback.answer("Tarif topilmadi.", show_alert=True)
         return
+
     if is_premium(uid):
         await callback.answer("Sizda Premium hali faol.", show_alert=True)
         return
-    
+
     pending = get_pending_payment_for_user(uid)
+
     if pending:
-        await callback.answer(f"Sizda #{pending['id']} raqamli kutilayotgan to'lov bor.", show_alert=True)
+        await callback.answer(
+            f"Sizda #{pending['id']} raqamli kutilayotgan to'lov bor.",
+            show_alert=True,
+        )
         return
-    
+
     USER_PAYMENT_PLAN[uid] = key
     plan = PLANS[key]
-    final, discount, _ = referral_price(uid, key)
-    
-    if discount:
-        price_text = f"<s>{money(plan['price'])} so'm</s> → <b>{money(final)} so'm</b>\n🔥 Chegirma: <b>{money(discount)} so'm</b>"
-    else:
-        price_text = f"<b>{money(final)} so'm</b>"
-    
+
     await callback.message.answer(
         "🧾 <b>TARIF TANLANDI</b>\n\n"
         f"💎 Tarif: <b>{esc(plan['name'])}</b>\n"
-        f"💰 Summa: {price_text}\n\n"
+        f"💰 Summa: <b>{money(plan['price'])} so'm</b>\n\n"
         "Endi to'lovni amalga oshiring.\n"
         "Keyin chek rasmini shu botga yuboring.\n\n"
         "Bekor qilish: <code>/cancel</code>"
     )
     await callback.answer()
 
-# =========================================================
-# RECEIPTS
-# =========================================================
-async def notify_admin_about_receipt(payment_id, user_id, first_name, username, payment, file_id, receipt_type, message_text=""):
-    original = payment["original_price"] or payment["price"]
-    final = payment["final_price"] or payment["price"]
-    discount = payment["discount_amount"] or 0
-    
+
+async def notify_admin_about_receipt(
+    payment_id,
+    user_id,
+    first_name,
+    username,
+    payment,
+    file_id,
+    receipt_type,
+    message_text="",
+):
+    price = payment["final_price"] or payment["price"]
+
     caption = (
         "🧾 <b>YANGI TO'LOV</b>\n\n"
         f"🧾 To'lov ID: <code>#{payment_id}</code>\n"
         f"👤 Ism: <b>{esc(first_name)}</b>\n"
-        f"🔗 Username: {('@' + esc(username)) if username else 'Username yo‘q'}\n"
+        f"🔗 Username: "
+        f"{('@' + esc(username)) if username else 'Username yo‘q'}\n"
         f"🆔 User ID: <code>{user_id}</code>\n\n"
         f"💎 Tarif: <b>{esc(payment['plan_name'])}</b>\n"
-        f"💰 Asl summa: <b>{money(original)} so'm</b>\n"
+        f"💳 To'lanadigan: <b>{money(price)} so'm</b>\n"
+        f"🕐 Vaqt: <code>{now_text()}</code>"
     )
-    if discount:
-        caption += f"🔥 Referral chegirma: <b>-{money(discount)} so'm</b>\n"
-    caption += f"💳 To'lanadigan: <b>{money(final)} so'm</b>\n"
-    caption += f"🕐 Vaqt: <code>{now_text()}</code>\n"
-    if payment["referrer_id"]:
-        caption += f"👥 Referrer ID: <code>{payment['referrer_id']}</code>\n"
+
     if message_text:
-        caption += f"\n📝 User izohi: <i>{esc(message_text[:700])}</i>"
-    
+        caption += (
+            f"\n\n📝 User izohi: "
+            f"<i>{esc(message_text[:700])}</i>"
+        )
+
     markup = payment_admin_keyboard(payment_id)
-    
+
     if receipt_type == "photo":
-        await bot.send_photo(chat_id=ADMIN_ID, photo=file_id, caption=caption, reply_markup=markup)
+        await bot.send_photo(
+            chat_id=ADMIN_ID,
+            photo=file_id,
+            caption=caption,
+            reply_markup=markup,
+        )
     else:
-        await bot.send_document(chat_id=ADMIN_ID, document=file_id, caption=caption, reply_markup=markup)
+        await bot.send_document(
+            chat_id=ADMIN_ID,
+            document=file_id,
+            caption=caption,
+            reply_markup=markup,
+        )
+
 
 @dp.message(F.photo)
 async def receipt_photo_handler(message: Message):
@@ -1143,8 +1242,6 @@ async def handle_receipt(message: Message, receipt_type, file_id):
         
         original = payment["original_price"] or payment["price"]
         final = payment["final_price"] or payment["price"]
-        discount = payment["discount_amount"] or 0
-        price_text = f"{money(final)} so'm" if not discount else f"{money(final)} so'm (10% referral chegirma)"
         
         await message.answer(
             "✅ <b>CHEK QABUL QILINDI</b>\n\n"
@@ -1167,97 +1264,117 @@ async def approve_callback(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Ruxsat yo'q.", show_alert=True)
         return
+
+    if not admin_ok(callback.from_user.id):
+        await callback.answer(
+            "Avval /admin orqali PIN kiriting.",
+            show_alert=True,
+        )
+        return
+
     try:
-        payment_id = int(callback.data.replace("approve_", "", 1))
+        payment_id = int(
+            callback.data.replace("approve_", "", 1)
+        )
     except ValueError:
-        await callback.answer("ID noto'g'ri.", show_alert=True)
+        await callback.answer(
+            "ID noto'g'ri.",
+            show_alert=True,
+        )
         return
-    
+
     result = approve_payment(payment_id)
+
     if result is None:
-        await callback.answer("To'lov topilmadi.", show_alert=True)
+        await callback.answer(
+            "To'lov topilmadi.",
+            show_alert=True,
+        )
         return
+
     if result in ("already", "processed"):
-        await callback.answer("Bu to'lov allaqachon ko'rib chiqilgan.", show_alert=True)
+        await callback.answer(
+            "Bu to'lov allaqachon ko'rib chiqilgan.",
+            show_alert=True,
+        )
         return
-    
+
     plan = PLANS.get(result["plan_key"])
+
     if not plan:
-        await callback.answer("Tarif topilmadi.", show_alert=True)
+        await callback.answer(
+            "Tarif topilmadi.",
+            show_alert=True,
+        )
         return
-    
-    uid = result["user_id"]
+
+    uid = int(result["user_id"])
+
     if not get_user(uid):
-        await callback.answer("User topilmadi.", show_alert=True)
+        await callback.answer(
+            "User topilmadi.",
+            show_alert=True,
+        )
         return
-    
-    new_until = activate_premium(uid, plan["days"])
+
+    new_until = activate_premium(
+        uid,
+        plan["days"],
+    )
+
     if not new_until:
-        await callback.answer("Premium ochilmadi.", show_alert=True)
+        await callback.answer(
+            "Premium ochilmadi.",
+            show_alert=True,
+        )
         return
-    
+
     stat_add("approved_payments")
-    
-    # Referral bonus
-    referral = None
-    if result["referrer_id"]:
-        referral = complete_referral(uid, payment_id)
-    if referral:
-        referrer_id = referral["referrer_id"]
-        referrer_until = activate_premium(referrer_id, 1)
-        stat_add("referral_rewards")
-        try:
-            await bot.send_message(
-                referrer_id,
-                "🎁 <b>REFERRAL BONUS!</b>\n\n"
-                f"👤 Siz taklif qilgan user Premium sotib oldi.\n"
-                "💎 Sizga <b>+1 kun Premium</b> qo'shildi.\n"
-                f"⏳ Yangi tugash: <code>{fmt_dt(referrer_until)}</code>",
-            )
-        except Exception:
-            logging.exception("Referral reward notification failed")
-    
+
     try:
-        discount = result["discount_amount"] or 0
-        paid = result["final_price"] or result["price"]
-        extra = ""
-        if discount:
-            extra = f"\n🔥 Referral chegirma: <b>-{money(discount)} so'm</b>\n💳 To'langan: <b>{money(paid)} so'm</b>"
-        
         await bot.send_message(
             uid,
             "🎉 <b>PREMIUM FAOLLASHDI</b>\n\n"
             f"💎 Tarif: <b>{esc(plan['name'])}</b>\n"
             f"⏳ Tugash: <code>{fmt_dt(new_until)}</code>\n"
-            f"📅 Muddat: <b>{plan['days']} kun</b>"
-            f"{extra}\n\n"
+            f"📅 Muddat: <b>{plan['days']} kun</b>\n\n"
             "✅ To'lovingiz tasdiqlandi.\n"
             "🍿 Yoqimli tomosha!",
         )
     except Exception:
-        logging.exception("Approved-user notification failed")
-    
+        logging.exception(
+            "Approved-user notification failed"
+        )
+
     try:
         caption = (
             "✅ <b>TO'LOV TASDIQLANDI</b>\n\n"
             f"🧾 ID: <code>#{payment_id}</code>\n"
             f"🆔 User: <code>{uid}</code>\n"
             f"💎 Tarif: <b>{esc(plan['name'])}</b>\n"
-            f"💳 To'langan: <b>{money(result['final_price'] or result['price'])} so'm</b>\n"
-            f"⏳ Tugash: <code>{fmt_dt(new_until)}</code>\n"
+            f"💳 To'langan: "
+            f"<b>{money(result['final_price'] or result['price'])} so'm</b>\n"
+            f"⏳ Tugash: <code>{fmt_dt(new_until)}</code>\n\n"
+            "Status: <b>APPROVED</b>"
         )
-        if referral:
-            caption += f"\n🎁 Referrer: <code>{referral['referrer_id']}</code>\n🎁 Bonus: <b>+1 kun berildi</b>\n"
-        caption += "\nStatus: <b>APPROVED</b>"
-        
-        await callback.message.edit_caption(caption=caption)
+
+        await callback.message.edit_caption(
+            caption=caption
+        )
     except Exception:
-        logging.exception("Could not edit receipt caption")
-    
+        logging.exception(
+            "Could not edit receipt caption"
+        )
+
     await callback.answer("Premium ochildi!")
+
 
 @dp.callback_query(F.data.startswith("reject_"))
 async def reject_callback(callback: CallbackQuery):
+    if not admin_ok(callback.from_user.id):
+        await callback.answer("Avval /admin orqali PIN kiriting.", show_alert=True)
+        return
+
     if not is_admin(callback.from_user.id):
         await callback.answer("Ruxsat yo'q.", show_alert=True)
         return
@@ -1383,10 +1500,8 @@ async def show_admin_panel(message: Message):
     total_users = count_users()
     total_movies, _, _ = movie_counts()
     active_premium = count_active_premium()
-    pending, approved, rejected, paid_users, revenue, discounts = payment_stats()
+    pending, approved, rejected, paid_users, revenue = payment_stats()
     channel_count = len(all_required_channels())
-    invited = stat_get("referrals")
-    rewards = stat_get("referral_rewards")
     
     await message.answer(
         "╭━━━━━━━━━━━━━━━━━━━━╮\n"
@@ -1401,9 +1516,6 @@ async def show_admin_panel(message: Message):
         f"❌ Rad etilgan: <b>{rejected}</b>\n"
         f"👤 To'lov qilgan user: <b>{paid_users}</b>\n"
         f"💰 Daromad: <b>{money(revenue)} so'm</b>\n"
-        f"🔥 Berilgan chegirmalar: <b>{money(discounts)} so'm</b>\n"
-        f"👥 Referrals: <b>{invited}</b>\n"
-        f"🎁 Referral bonuslar: <b>{rewards}</b>\n\n"
         "👇 Boshqaruv:",
         reply_markup=admin_menu(),
     )
@@ -1507,73 +1619,87 @@ async def text_router(message: Message):
                     return
                 
                 if step == "channel_input":
-                    raw = text
-                    invite_link = None
-                    channel_input = raw
-                    if "|" in raw:
-                        channel_input, invite_link = raw.split("|", 1)
-                        channel_input = channel_input.strip()
-                        invite_link = invite_link.strip()
-                    
+                    channel_username = (
+                        normalize_channel_username(text)
+                    )
+
+                    if not channel_username:
+                        await message.answer(
+                            "❌ Kanal noto'g'ri formatda.\n\n"
+                            "Faqat public kanal yuboring:\n"
+                            "<code>@kanal_username</code>\n"
+                            "yoki\n"
+                            "<code>https://t.me/kanal_username</code>"
+                        )
+                        return
+
                     try:
-                        if channel_input.lstrip("-").isdigit():
-                            lookup = int(channel_input)
-                        else:
-                            lookup = channel_input
-                        
-                        chat = await bot.get_chat(lookup)
+                        chat = await bot.get_chat(
+                            channel_username
+                        )
+
                         if chat.type != "channel":
-                            await message.answer("❌ Bu chat kanal emas.\nKanal username yoki kanal ID yuboring.")
-                            return
-                        
-                        username = getattr(chat, "username", None)
-                        title = getattr(chat, "title", None) or "Kanal"
-                        
-                        if not username and not invite_link:
-                            await message.answer("❌ Private kanal uchun invite link ham yuboring.\n\n<code>-1001234567890|https://t.me/+INVITE</code>")
-                            return
-                        
-                        # Bot adminligini tekshirish
-                        me = await bot.get_me()
-                        bot_member = await bot.get_chat_member(chat.id, me.id)
-                        bot_status = getattr(bot_member, "status", None)
-                        bot_status = getattr(bot_status, "value", bot_status)
-                        
-                        if bot_status not in ("administrator", "creator"):
                             await message.answer(
-                                "❌ Bot bu kanalda administrator emas.\n\n"
-                                "Botni kanalga ADMIN qilib qo'ying, keyin kanalni qayta qo'shing.\n\n"
-                                f"Bot statusi: <code>{esc(bot_status)}</code>"
+                                "❌ Bu username kanalniki emas.\n"
+                                "Public Telegram kanal username kiriting."
                             )
                             return
-                        
-                        channel_id = add_required_channel(chat.id, username, title, invite_link)
+
+                        username = (
+                            getattr(chat, "username", None)
+                            or channel_username.lstrip("@")
+                        )
+
+                        title = (
+                            getattr(chat, "title", None)
+                            or username
+                            or "Kanal"
+                        )
+
+                        channel_id = add_required_channel(
+                            chat.id,
+                            username,
+                            title,
+                            f"https://t.me/{username}",
+                        )
+
                         if not channel_id:
-                            await message.answer("❌ Bu kanal allaqachon majburiy obunaga qo'shilgan.")
+                            await message.answer(
+                                "❌ Bu kanal allaqachon "
+                                "majburiy obunaga qo'shilgan."
+                            )
                             return
-                        
-                        ADMIN_STATE[uid] = {"step": "panel", "authenticated": True}
-                        url = invite_link or (f"https://t.me/{username.lstrip('@')}" if username else "-")
-                        
+
+                        ADMIN_STATE[uid] = {
+                            "step": "panel",
+                            "authenticated": True,
+                        }
+
                         await message.answer(
                             "✅ <b>KANAL QO'SHILDI</b>\n\n"
                             f"📢 Nomi: <b>{esc(title)}</b>\n"
-                            f"🆔 Chat ID: <code>{chat.id}</code>\n"
-                            f"🔗 Username: <code>{esc(username or '-')}</code>\n"
-                            f"🌐 Link: <code>{esc(url)}</code>\n\n"
-                            "✅ Bot administrator ekanligi tekshirildi.",
+                            f"🔗 Username: <code>@{esc(username)}</code>\n"
+                            f"🌐 Link: "
+                            f"<code>https://t.me/{esc(username)}</code>\n\n"
+                            "✅ Botni kanalga ADMIN qilish "
+                            "tekshiruvi olib tashlangan.",
                             reply_markup=admin_menu(),
                         )
-                    except Exception:
-                        logging.exception("Required channel add failed")
-                        await message.answer(
-                            "❌ Kanalni tekshirishda xatolik.\n\n"
-                            "Public: <code>@kanal_username</code>\n"
-                            "Private: <code>-100...|https://t.me/+...</code>\n\n"
-                            "Bot kanalga ADMIN qilib q'yilganini tekshiring."
+
+                    except Exception as exc:
+                        logging.exception(
+                            "Required channel add failed"
                         )
+
+                        await message.answer(
+                            "❌ Kanalni qo'shishda xatolik.\n\n"
+                            "Kanal public ekanini va username "
+                            "to'g'ri ekanini tekshiring.\n\n"
+                            f"<code>{esc(str(exc)[:400])}</code>"
+                        )
+
                     return
-    
+
     # Oddiy userlar uchun kino qidirish
     create_or_update_user(message)
     await search_movie(message, text)
@@ -1703,15 +1829,12 @@ async def admin_users(callback: CallbackQuery):
     for row in rows:
         status = "💎" if is_premium(row["id"]) else "🆓"
         uname = f"@{esc(row['username'])}" if row["username"] else "-"
-        invited, successful = referral_counts(row["id"])
         text += (
             f"{status} <b>{esc(row['first_name'])}</b>\n"
             f"├ ID: <code>{row['id']}</code>\n"
             f"├ Username: {uname}\n"
             f"├ Premium: <code>{fmt_dt(row['premium_until'])}</code>\n"
             f"├ Kino: <b>{row['total_movies']}</b>\n"
-            f"├ Referral: <b>{invited}</b>\n"
-            f"└ Muvaffaqiyatli: <b>{successful}</b>\n\n"
         )
     
     await callback.message.answer(text[:3900], reply_markup=back_admin_keyboard())
@@ -1725,8 +1848,6 @@ async def admin_payments(callback: CallbackQuery):
     cur = conn.cursor()
     cur.execute("""
         SELECT id, user_id, username, first_name, plan_name,
-               price, original_price, discount_amount, final_price,
-               referrer_id, status, created_at
         FROM payments ORDER BY id DESC LIMIT 50
     """)
     rows = cur.fetchall()
@@ -1744,7 +1865,6 @@ async def admin_payments(callback: CallbackQuery):
         uname = f"@{esc(row['username'])}" if row["username"] else "-"
         final = row["final_price"] or row["price"]
         original = row["original_price"] or row["price"]
-        discount = row["discount_amount"] or 0
         
         text += (
             f"{status_map.get(row['status'], '❔')} <b>#{row['id']}</b>\n"
@@ -1754,10 +1874,6 @@ async def admin_payments(callback: CallbackQuery):
             f"💰 Asl: {money(original)} so'm\n"
             f"💳 To'lov: <b>{money(final)} so'm</b>\n"
         )
-        if discount:
-            text += f"🔥 Chegirma: -{money(discount)} so'm\n"
-        if row["referrer_id"]:
-            text += f"👥 Referrer: <code>{row['referrer_id']}</code>\n"
         text += f"🕐 {esc(row['created_at'])}\n\n"
         
         if len(text) > 3500:
@@ -1775,7 +1891,7 @@ async def admin_stats(callback: CallbackQuery):
     total_users = count_users()
     active_premium = count_active_premium()
     total_movies, free_movies, premium_movies = movie_counts()
-    pending, approved, rejected, paid_users, revenue, discounts = payment_stats()
+    pending, approved, rejected, paid_users, revenue = payment_stats()
     
     conn = db()
     cur = conn.cursor()
@@ -1802,9 +1918,6 @@ async def admin_stats(callback: CallbackQuery):
         f"❌ Rejected: <b>{rejected}</b>\n"
         f"👤 Paid users: <b>{paid_users}</b>\n"
         f"💰 Daromad: <b>{money(revenue)} so'm</b>\n"
-        f"🔥 Chegirmalar: <b>{money(discounts)} so'm</b>\n\n"
-        f"👥 Referrals: <b>{stat_get('referrals')}</b>\n"
-        f"🎁 Referral bonuslar: <b>{stat_get('referral_rewards')}</b>\n"
         f"🧾 Cheklar: <b>{stat_get('receipts')}</b>\n"
         f"📢 Broadcastlar: <b>{stat_get('broadcasts')}</b>\n"
         f"📢 Majburiy kanallar: <b>{len(all_required_channels())}</b>",
@@ -1836,9 +1949,10 @@ async def admin_add_channel(callback: CallbackQuery):
     await callback.message.answer(
         "➕ <b>KANAL QO'SHISH</b>\n\n"
         "Format:\n"
-        "<code>@kanal_username</code> yoki\n"
-        "<code>-1001234567890|https://t.me/+INVITE</code>\n\n"
-        "Bot kanalda ADMIN bo'lishi shart!"
+        "<code>@kanal_username</code>\n"
+        "yoki\n"
+        "<code>https://t.me/kanal_username</code>\n\n"
+        "✅ Botni kanalga ADMIN qilish shart emas."
     )
     await callback.answer()
 
@@ -2128,9 +2242,7 @@ async def main():
     print("🔐 Admin ID:", ADMIN_ID)
     print("💎 Plans:", ", ".join(PLANS.keys()))
     print("📢 Required channels:", len(all_required_channels()))
-    print("👥 Referral system: ON")
-    print("🔥 Referral discount: 10%")
-    print("🎁 Referral reward: +1 day")
+    print("🔗 Channel mode: public username/link, no bot-admin check")
     print("=" * 65)
     
     await check_admin_delivery()
